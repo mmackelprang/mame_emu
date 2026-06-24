@@ -1,0 +1,43 @@
+{
+  "_comment": "Pinned, hashed manifest for the differential CPU oracle (ADR 0001). Fixtures are FETCHED, NOT VENDORED: only this small file is committed; the vectors land in the gitignored build/cpuoracle/ cache via tests/cpuoracle/fetch_vectors.py. Each core pins an immutable upstream ref (tag or commit), the SHA-256 of the fetched .tar.gz source archive, and a mirrors[] list (primary + >=1 fallback) of byte-identical URLs for that archive. Bump a pin deliberately: re-fetch, recompute sha256, update ref + expected_file_count.",
+  "corpus": "SingleStepTests/ProcessorTests (formerly \"TomHarte\")",
+  "schema_version": 1,
+  "cores": {
+    "z80": {
+      "repo": "SingleStepTests/z80",
+      "ref": "v1.0-beta.2",
+      "ref_commit": "ebe1875d48f374bcfd4b505d8eb8ee751568b5f7",
+      "sha256": "24e84fe045910be3c7ca717f8e6523dfa57cc07595932670a7369e13721e9459",
+      "archive_member_prefix": "z80-1.0-beta.2/v1/",
+      "expected_file_count": 1604,
+      "mirrors": [
+        "https://codeload.github.com/SingleStepTests/z80/tar.gz/refs/tags/v1.0-beta.2",
+        "https://github.com/SingleStepTests/z80/archive/refs/tags/v1.0-beta.2.tar.gz"
+      ]
+    },
+    "m6502": {
+      "repo": "SingleStepTests/65x02",
+      "ref": "2f6980a2d95757486c7bee24355c360e40e2a224",
+      "ref_commit": "2f6980a2d95757486c7bee24355c360e40e2a224",
+      "sha256": "8638717531e8e67d9bbffc18300f4aa955482426b096b72af95d721f9437a857",
+      "archive_member_prefix": "65x02-2f6980a2d95757486c7bee24355c360e40e2a224/6502/v1/",
+      "expected_file_count": 256,
+      "mirrors": [
+        "https://codeload.github.com/SingleStepTests/65x02/tar.gz/2f6980a2d95757486c7bee24355c360e40e2a224",
+        "https://github.com/SingleStepTests/65x02/archive/2f6980a2d95757486c7bee24355c360e40e2a224.tar.gz"
+      ]
+    },
+    "m68000": {
+      "repo": "SingleStepTests/m68000",
+      "ref": "64b253116a3de04aaac4346c43680960dc9b67e5",
+      "ref_commit": "64b253116a3de04aaac4346c43680960dc9b67e5",
+      "sha256": "6feef5467b764596bc03a84cd6a2be786e6a00f4ccb08d44322ff2bf3e0adb51",
+      "archive_member_prefix": "m68000-64b253116a3de04aaac4346c43680960dc9b67e5/v1/",
+      "expected_file_count": 127,
+      "mirrors": [
+        "https://codeload.github.com/SingleStepTests/m68000/tar.gz/64b253116a3de04aaac4346c43680960dc9b67e5",
+        "https://github.com/SingleStepTests/m68000/archive/64b253116a3de04aaac4346c43680960dc9b67e5.tar.gz"
+      ]
+    }
+  }
+}

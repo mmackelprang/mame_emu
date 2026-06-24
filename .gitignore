@@ -47,5 +47,9 @@ docs/build
 docs/source/_build
 regtests/chdman/temp
 regtests/jedutil/output
+# CPU oracle fixtures are fetched, not vendored (ADR 0001): the SingleStepTests
+# corpus is downloaded into this cache by tests/cpuoracle/fetch_vectors.py and
+# must never be committed.
+/build/cpuoracle/
 /CMakeLists.txt
 /samples
