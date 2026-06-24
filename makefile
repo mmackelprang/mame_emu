@@ -1579,6 +1579,39 @@ else
 endif
 
 #-------------------------------------------------
+# Source-set staleness check (ADR 0005 / Pick 5)
+#-------------------------------------------------
+#
+# GENie globs the source tree at project-generation time, so a .cpp/.h/.ipp
+# added after the last `make REGENIE=1` is silently left out of the build.
+# `make check-sources` fingerprints the source set GENie would glob now and
+# compares it to the set baked into the generated project files.
+#
+# Behaviour is warn-only by default (prints a warning, exits 0) so it is safe to
+# fold into other flows without surprising anyone or altering the default build:
+#   make check-sources                  # warn on staleness, exit 0
+#   make check-sources AUTO_REGENIE=1   # opt-in: re-run `make REGENIE=1` if stale
+#   make check-sources FAIL_ON_STALE=1  # CI fail mode: non-zero exit on staleness
+# AUTO_REGENIE only regenerates when the detector reports staleness (the
+# detector exits non-zero in --fail-on-stale mode, gating the `|| $(MAKE)
+# REGENIE=1`).  This target is purely additive: it is never pulled into the
+# default `all`/`generate` build path and does nothing unless invoked.
+
+.PHONY: check-sources
+
+check-sources:
+ifdef AUTO_REGENIE
+	@echo Checking for new sources...
+	$(SILENT)$(PYTHON) scripts/build/sourcestale.py --root . --target $(TARGET) --projectdir $(BUILDDIR)/projects --fail-on-stale || $(MAKE) $(MAKEPARAMS) REGENIE=1
+else
+ifdef FAIL_ON_STALE
+	$(SILENT)$(PYTHON) scripts/build/sourcestale.py --root . --target $(TARGET) --projectdir $(BUILDDIR)/projects --fail-on-stale
+else
+	$(SILENT)$(PYTHON) scripts/build/sourcestale.py --root . --target $(TARGET) --projectdir $(BUILDDIR)/projects
+endif
+endif
+
+#-------------------------------------------------
 # Doxygen documentation
 #-------------------------------------------------
 
