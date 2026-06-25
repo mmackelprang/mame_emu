@@ -33,6 +33,7 @@
       "ref_commit": "64b253116a3de04aaac4346c43680960dc9b67e5",
       "sha256": "6feef5467b764596bc03a84cd6a2be786e6a00f4ccb08d44322ff2bf3e0adb51",
       "archive_member_prefix": "m68000-64b253116a3de04aaac4346c43680960dc9b67e5/v1/",
+      "format": "m68000_bin",
       "expected_file_count": 127,
       "mirrors": [
         "https://codeload.github.com/SingleStepTests/m68000/tar.gz/64b253116a3de04aaac4346c43680960dc9b67e5",

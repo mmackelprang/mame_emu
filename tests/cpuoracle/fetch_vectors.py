@@ -44,6 +44,7 @@ import hashlib
 import json
 import os
 import shutil
+import struct
 import sys
 import tarfile
 import tempfile
@@ -75,6 +76,139 @@ _TIMEOUT = 600
 
 class FetchError(Exception):
     """A user-facing fetch/verify failure (printed without a traceback)."""
+
+
+# ---------------------------------------------------------------------------
+# m68000 binary-fixture decoder
+# ---------------------------------------------------------------------------
+#
+# The SingleStepTests/m68000 corpus ships its vectors as a custom little-endian
+# binary container (``*.json.bin``) rather than plain JSON.  The format is
+# documented by the upstream ``decode.py`` at the pinned ref; this is a faithful
+# re-implementation that emits the same logical test objects the harness needs.
+#
+# We deliberately decode at *fetch* time (not in the C++ harness) so the harness
+# stays JSON-uniform across all cores -- it discovers and parses ``*.json`` for
+# every core identically.  The decoded JSON keeps the fields the oracle asserts
+# on (per-register initial/final state, the prefetch queue, byte-addressed RAM,
+# and the architectural cycle count ``length``); the verbose per-cycle
+# ``transactions`` bus log is dropped to keep the cache from ballooning, since
+# the harness measures cycles from the core itself, not from that log.
+
+# 68000 register order in the binary state block (matches upstream decode.py).
+_M68K_REG_ORDER = (
+    "d0", "d1", "d2", "d3", "d4", "d5", "d6", "d7",
+    "a0", "a1", "a2", "a3", "a4", "a5", "a6", "usp",
+    "ssp", "sr", "pc",
+)
+
+# Magic constants from the upstream container format.
+_M68K_MAGIC_FILE = 0x1A3F5D71
+_M68K_MAGIC_TEST = 0xABC12367
+_M68K_MAGIC_NAME = 0x89ABCDEF
+_M68K_MAGIC_STATE = 0x01234567
+_M68K_MAGIC_TRANS = 0x456789AB
+
+
+def _m68k_read_name(content, ptr):
+    _numbytes, magic = struct.unpack_from("<II", content, ptr)
+    ptr += 8
+    if magic != _M68K_MAGIC_NAME:
+        raise FetchError("m68000 decode: bad name magic 0x{:08x}".format(magic))
+    strlen = struct.unpack_from("<I", content, ptr)[0]
+    ptr += 4
+    name = struct.unpack_from("{}s".format(strlen), content, ptr)[0].decode("utf-8")
+    ptr += strlen
+    return ptr, name
+
+
+def _m68k_read_state(content, ptr):
+    state = {}
+    _numbytes, magic = struct.unpack_from("<II", content, ptr)
+    ptr += 8
+    if magic != _M68K_MAGIC_STATE:
+        raise FetchError("m68000 decode: bad state magic 0x{:08x}".format(magic))
+    for reg in _M68K_REG_ORDER:
+        state[reg] = struct.unpack_from("<I", content, ptr)[0]
+        ptr += 4
+    pf0, pf1 = struct.unpack_from("<II", content, ptr)
+    ptr += 8
+    state["prefetch"] = [pf0, pf1]
+    num_rams = struct.unpack_from("<I", content, ptr)[0]
+    ptr += 4
+    ram = []
+    for _ in range(num_rams):
+        addr, data = struct.unpack_from("<IH", content, ptr)
+        ptr += 6
+        # each entry is a 16-bit big-endian word -> two byte cells
+        ram.append([addr, data >> 8])
+        ram.append([addr | 1, data & 0xFF])
+    state["ram"] = ram
+    return ptr, state
+
+
+def _m68k_skip_transactions(content, ptr):
+    """Consume the transactions block, returning (ptr, num_cycles).
+
+    The per-cycle bus log itself is discarded; only its ``num_cycles`` count is
+    kept (as the fixture's architectural cycle length)."""
+    _numbytes, magic = struct.unpack_from("<II", content, ptr)
+    ptr += 8
+    if magic != _M68K_MAGIC_TRANS:
+        raise FetchError("m68000 decode: bad transactions magic 0x{:08x}".format(magic))
+    num_cycles, num_transactions = struct.unpack_from("<II", content, ptr)
+    ptr += 8
+    for _ in range(num_transactions):
+        tw = struct.unpack_from("<B", content, ptr)[0]
+        ptr += 5  # type byte + 4-byte cycle count
+        if tw != 0:
+            ptr += 20  # fc, addr, data, UDS, LDS (5 x u32)
+    return ptr, num_cycles
+
+
+def _decode_m68000_bin(blob):
+    """Decode one ``*.json.bin`` byte string into a list of test dicts."""
+    ptr = 0
+    magic, num_tests = struct.unpack_from("<II", blob, ptr)
+    ptr += 8
+    if magic != _M68K_MAGIC_FILE:
+        raise FetchError("m68000 decode: bad file magic 0x{:08x}".format(magic))
+    tests = []
+    for _ in range(num_tests):
+        _numbytes, tmagic = struct.unpack_from("<II", blob, ptr)
+        ptr += 8
+        if tmagic != _M68K_MAGIC_TEST:
+            raise FetchError("m68000 decode: bad test magic 0x{:08x}".format(tmagic))
+        test = {}
+        ptr, test["name"] = _m68k_read_name(blob, ptr)
+        ptr, test["initial"] = _m68k_read_state(blob, ptr)
+        ptr, test["final"] = _m68k_read_state(blob, ptr)
+        ptr, test["length"] = _m68k_skip_transactions(blob, ptr)
+        tests.append(test)
+    return tests
+
+
+def _decode_bin_dir(dest_dir):
+    """In-place convert every ``*.json.bin`` in ``dest_dir`` to ``*.json``.
+
+    Returns the sorted list of resulting ``*.json`` basenames.  The ``.json.bin``
+    inputs are removed so the cache holds only the harness-consumable JSON.
+    """
+    out_names = []
+    for name in sorted(os.listdir(dest_dir)):
+        if not name.endswith(".json.bin"):
+            continue
+        bin_path = os.path.join(dest_dir, name)
+        with open(bin_path, "rb") as fh:
+            blob = fh.read()
+        tests = _decode_m68000_bin(blob)
+        json_name = name[:-len(".bin")]   # strip trailing ".bin" -> "*.json"
+        with open(os.path.join(dest_dir, json_name), "w", encoding="utf-8", newline="\n") as fh:
+            json.dump(tests, fh, separators=(",", ":"))
+            fh.write("\n")
+        os.remove(bin_path)
+        out_names.append(json_name)
+    return sorted(out_names)
 
 
 def _sha256_file(path):
@@ -310,6 +444,14 @@ def fetch_core(manifest, core):
         print("  archive sha256 verified: {}".format(actual_sha))
 
         names = _extract_vectors(archive_path, entry["archive_member_prefix"], dest_dir)
+
+        # Some cores (m68000) ship a custom binary container; decode it to plain
+        # JSON in place so the harness sees uniform *.json across every core.
+        # The per-file SHA-256 index is written over the *decoded* files, so a
+        # later integrity re-verify checks exactly what the harness will read.
+        if entry.get("format") == "m68000_bin":
+            names = _decode_bin_dir(dest_dir)
+
         _write_checksum_index(dest_dir, names)
 
         expected_count = entry.get("expected_file_count")

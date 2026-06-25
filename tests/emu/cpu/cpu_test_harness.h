@@ -16,8 +16,7 @@
     The harness is written to be reusable across CPU cores: a core is
     described by a cpu_core_descriptor (a device type plus a table mapping
     fixture register-field names to device_state_interface state indices).
-    The z80 and m6502 legs are implemented here; the m68000 descriptor is
-    intentionally out of scope for this PR.
+    The z80, m6502 and m68000 legs are implemented here.
 
 ***************************************************************************/
 #ifndef MAME_TESTS_EMU_CPU_CPU_TEST_HARNESS_H
@@ -210,6 +209,13 @@ const cpu_core_descriptor &z80_core_descriptor();
 
 // Returns the descriptor for the m6502 oracle core.
 const cpu_core_descriptor &m6502_core_descriptor();
+
+//**************************************************************************
+//  M68000 LEG
+//**************************************************************************
+
+// Returns the descriptor for the m68000 oracle core.
+const cpu_core_descriptor &m68000_core_descriptor();
 
 } // namespace cpuoracle
 
