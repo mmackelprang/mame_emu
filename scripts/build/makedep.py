@@ -802,7 +802,11 @@ class DriverReconciler(DriverFilter):
         # any instance state, so it works without parsing the (possibly stale)
         # list file -- the whole point of --fix is to repair that file.
         handler = cls.CollectHandler()
-        xml.sax.parse(xmlfile, handler=handler)
+        try:
+            xml.sax.parse(xmlfile, handler=handler)
+        except xml.sax.SAXException as err:
+            sys.stderr.write('Error parsing system information file: %s\n' % (err, ))
+            sys.exit(1)
         return handler
 
 
@@ -873,20 +877,28 @@ def fix_driver_list(listpath, collected):
         header_lines = lines[:first_source]
         body_lines = lines[first_source:]
 
-    # Parse the body into ordered group blocks.  A line whose stripped form
-    # starts with '@source:' opens a group; subsequent non-blank, non-'@',
-    # non-'#' lines are its drivers; blank lines are separators.
+    # Parse the body into ordered group blocks.  A '#'-prefixed line is a
+    # load-bearing #include directive --fix can't handle, so it's a hard error;
+    # a line whose stripped form starts with '@source:' opens a group;
+    # subsequent non-blank, non-'@' lines are its drivers; blank lines are
+    # separators.
     groups = [ ]            # list of [source, [drivers]]
     current = None
     for line in body_lines:
         stripped = line.strip()
-        if stripped.startswith('@'):
+        if stripped.startswith('#'):
+            # #-prefixed lines are load-bearing #include directives, not
+            # comments.  --fix can't safely rewrite recursive/multi-file lists,
+            # so fail loudly rather than silently dropping the directive.
+            sys.stderr.write('reconcilelist --fix does not support list files with #include directives (found "%s"); fix the referenced file directly\n' % (stripped, ))
+            sys.exit(1)
+        elif stripped.startswith('@'):
             # Open a new @source: group (parse the source path after the colon).
             parts = stripped[1:].lstrip().split(':', 1)
             source = parts[1].strip() if len(parts) == 2 else ''
             current = [source, [ ]]
             groups.append(current)
-        elif stripped and not stripped.startswith('#') and current is not None:
+        elif stripped and current is not None:
             current[1].append(stripped)
         # blank lines / stray content are dropped from the structured model;
         # we re-emit canonical blank-line separators below.
@@ -960,7 +972,9 @@ def fix_driver_list(listpath, collected):
             continue
         existing_sources.add(source)
         summary['groups_added'] += 1
-        summary['added'] += len(authoritative[source])
+        # Count only genuinely-new drivers; ones that merely moved in from an
+        # existing group were already tallied under 'moved'.
+        summary['added'] += sum(1 for d in authoritative[source] if d not in listed_drivers)
         newentry = [source, list(authoritative[source])]
         # Find the natural-sorted insertion index among current headers.
         key = natural_sort_key(source)

@@ -269,6 +269,41 @@ def test_driver_moved_between_sources(tmp_path):
     assert _check_clean(lstpath, xmlpath) is False
 
 
+def test_driver_moved_to_brand_new_source(tmp_path):
+    # Binary reports a driver under a source that does NOT exist in the list yet
+    # -> removed from its old group, and a brand-new @source: group is created
+    # for it at the natural-sorted position.  Here 'movee' leaves
+    # atari/asteroid.cpp for the brand-new konami/konami.cpp, which natural-sorts
+    # between the atari and sega groups.
+    lst = _lst(
+        ('atari/asteroid.cpp', ['asteroid', 'movee']),
+        ('sega/segas16a.cpp', ['shinobi']),
+    )
+    xml = _xml(
+        ('atari/asteroid.cpp', ['asteroid']),
+        ('konami/konami.cpp', ['movee']),
+        ('sega/segas16a.cpp', ['shinobi']),
+    )
+    lstpath = _write_lst(tmp_path, lst)
+    xmlpath = _write_xml(tmp_path, xml)
+    summary = _run_fix(lstpath, xmlpath)
+
+    # atari group keeps 'asteroid' (still has a binary driver), the new
+    # konami/konami.cpp group is inserted between atari and sega.
+    expected = _lst(
+        ('atari/asteroid.cpp', ['asteroid']),
+        ('konami/konami.cpp', ['movee']),
+        ('sega/segas16a.cpp', ['shinobi']),
+    )
+    assert _read_bytes(lstpath) == expected.encode('utf-8')
+    assert summary['moved'] == 1
+    assert summary['groups_added'] == 1
+    # The driver only moved -- it must not be counted as an add.
+    assert summary['added'] == 0
+    assert summary['removed'] == 0
+    assert _check_clean(lstpath, xmlpath) is False
+
+
 def test_noop_on_already_correct_list(tmp_path):
     # A list that already matches the xml -> --fix leaves it byte-identical.
     lst = _lst(
