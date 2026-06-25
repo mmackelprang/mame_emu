@@ -1,7 +1,9 @@
 # ADR 0002 — m68000 → DRCUML dynamic-recompiler port
 
 > **Status:** Proposed · **Phase:** P2 · **Owner:** TBD
-> **Depends on:** **[0001 (CPU oracle)](0001-differential-cpu-oracle.md) — hard gate**
+> **Depends on:** **[0001 (CPU oracle)](0001-differential-cpu-oracle.md) — hard gate**, with the
+> m68000 gate **defined by [0006](0006-m68000-oracle-gate-definition.md)** (the corpus is
+> MAME-derived, so the gate's cycle-exactness lives in Leg B: interpreter ≡ DRC)
 > **Spec:** [`docs/improvement-plan/specs/2026-06-24-mame-improvements-design.md`](../specs/2026-06-24-mame-improvements-design.md)
 > **Date:** 2026-06-24
 
@@ -139,13 +141,26 @@ ordering, and the new core's mid-instruction suspension. The strategy:
 The base 68000 alone covers the bulk of the ~549-driver win (Sega/CPS/Neo-Geo are
 predominantly plain 68000/68010).
 
-### 5. How [0001](0001-differential-cpu-oracle.md) gates this
+### 5. How [0001](0001-differential-cpu-oracle.md) gates this (definition: [0006](0006-m68000-oracle-gate-definition.md))
 
 No 68k DRC change merges unless: (a) the m68000 oracle (`./mametests "[m68000]"`) is
 green with `-drc 0`, **and** (b) the same vectors are green with DRC enabled —
 asserting interpreter ≡ DRC, register-, flag-, memory-, and **cycle-exact**. The
 oracle's dual-run parameterization (0001 §2) is exactly this check. This converts an
 otherwise unreviewable port into a regression-proof one.
+
+**What "green" means precisely is fixed by [ADR 0006](0006-m68000-oracle-gate-definition.md),**
+because the m68000 corpus turned out to be **MAME-derived** (upstream:
+*"Generated using the microcoded core in MAME"*, a 2024-08-01 snapshot) rather than an independent
+oracle. ADR 0006 splits the gate into **Leg A** (interpreter vs corpus — a breadth probe: 100%
+state equality + cycle equality except a frozen, provenance-cited allowlist of {TAS, TRAPV,
+address-error} opcodes) and **Leg B** (interpreter ≡ DRC — full register/flag/RAM/**cycle**
+equality across the whole corpus, allowlist included). **Clause (b) above is exactly Leg B**, and
+it is **corpus-drift-immune** — it compares two MAME execution paths, never the stale corpus — so
+it gives the DRC the cycle-for-cycle guarantee it needs regardless of corpus provenance. For
+allowlisted opcodes the DRC `cfunc_`s to the interpreter (§3 below), so Leg B holds there by
+construction, including cycles: the allowlist never punches a hole in the DRC safety net. The
+interpreter — never the corpus — is the authority for both legs.
 
 ## Integration seams (file:line)
 

@@ -2,6 +2,8 @@
 
 > **Status:** In progress (z80 leg landed) · **Phase:** P1 (enabler) · **Owner:** TBD
 > **Depends on:** none · **Depended on by:** [0002 (m68000 DRC)](0002-m68000-drcuml-port.md)
+> · **Refined by:** [0006 (m68000 oracle-gate definition)](0006-m68000-oracle-gate-definition.md)
+> (resolves the m68000 leg's authority + cycle-strictness question, OQ #3)
 > **Spec:** [`docs/improvement-plan/specs/2026-06-24-mame-improvements-design.md`](../specs/2026-06-24-mame-improvements-design.md)
 > **Date:** 2026-06-24
 
@@ -279,7 +281,11 @@ the scheduler timeline or save-state machinery, so determinism is untouched.
    corpus bus-cycle count. Hard-fail on cycle mismatch from day one, or land
    state-equality first and ratchet cycle-equality in per core? (Recommend: state +
    cycle for z80/m6502 immediately; allow a documented per-core cycle adapter for
-   68k.)
+   68k.) **→ RESOLVED for m68000 by [ADR 0006](0006-m68000-oracle-gate-definition.md):**
+   the m68000 corpus is **MAME-derived (not independent)**, so its gate is two legs —
+   Leg A (interpreter vs corpus: 100% state + cycle-except-a-provenance-allowlist) and
+   Leg B (interpreter ≡ DRC, corpus-drift-immune). The interpreter, not the corpus, is the
+   m68000 authority. z80/m6502 keep strict state+cycle vs their *independent* corpora.
 4. **`srcclean` gate scope.** Whole tree or changed-files-only initially? (Recommend:
    changed-files to avoid a large pre-existing-debt PR.)
 5. **i386 stretch in P1 or deferred.** Include the partial x86 corpus now, or defer

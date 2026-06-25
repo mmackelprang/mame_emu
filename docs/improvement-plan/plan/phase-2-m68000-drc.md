@@ -33,22 +33,30 @@ core** (`src/devices/cpu/m68000/m68000.cpp`), not the legacy Musashi core.
 ## Prerequisites
 
 1. **Phase 1 complete** — GNU `make` installed; the iteration loop verified.
-2. **HARD GATE (0001 → 0002):** the m68000 oracle (`./mametests "[m68000]"`) must be green
-   with **strict state + cycle equality** (the ratcheted per-CPU enforcement from Phase 1,
-   Task 5) **before any DRC code is written**. This gate is what makes a cycle-accurate
-   port reviewable; without it the port is unreviewable and Phase 2 does not start. ADR
-   0002 §5: *no 68k DRC change merges unless the oracle is green with `-drc 0` AND the same
-   vectors are green with DRC enabled.*
+2. **HARD GATE (0001 → 0002), defined by [ADR 0006](../adr/0006-m68000-oracle-gate-definition.md):**
+   the m68000 oracle (`./mametests "[m68000]"`) must be green **before any DRC code is written**.
+   Because the m68000 corpus is **MAME-derived** (not an independent oracle), ADR 0006 splits the
+   gate into two legs: **Leg A** (interpreter vs corpus — 100% state + cycle-except-a-frozen-
+   allowlist) lands in Phase 1, Task 5; **Leg B** (interpreter ≡ DRC — full register/flag/RAM/
+   **cycle** equality, **corpus-drift-immune**) is the part *this* phase produces and that every
+   DRC PR below is gated on. This gate is what makes a cycle-accurate port reviewable; without it
+   the port is unreviewable and Phase 2 does not start. ADR 0002 §5 / ADR 0006 acceptance criterion
+   3: *no 68k DRC change merges unless the oracle is green with `-drc 0` AND the same vectors are
+   green with DRC enabled, register/flag/memory/cycle-exact between the two.*
 3. The DRCUML core + all three backends are present and mature (`drcuml.cpp`,
    `drcbex64.cpp`, `drcbearm64.cpp`, `drcbec.cpp`) — no new backend is built.
 
 ## The hard cross-phase gate (restated, because it governs every task)
 
-Every DRC-touching task below has the **same merge gate**: `make TESTS=1 && ./mametests
-"[m68000]"` must be green **both** with `-drc 0` (oracle reference) **and** with DRC
-enabled (interpreter ≡ DRC), asserting register, flag, memory, **and cycle** equality. We
-**never** modify the interpreter to match the DRC — divergence is always a DRC bug, routed
-to `cfunc_`.
+Every DRC-touching task below has the **same merge gate** — **[ADR 0006](../adr/0006-m68000-oracle-gate-definition.md)
+acceptance criterion 3 (Leg B)**: `make TESTS=1 && ./mametests "[m68000]"` must be green **both**
+with `-drc 0` (oracle reference) **and** with DRC enabled (interpreter ≡ DRC), asserting register,
+flag, memory, **and cycle** equality between the two MAME runs **across the full corpus, allowlist
+included** (allowlisted opcodes `cfunc_` to the interpreter, so they pass by construction). This leg
+is **corpus-drift-immune** — it compares interpreter-output to DRC-output, never the stale corpus.
+We **never** modify the interpreter to match the DRC — divergence is always a DRC bug, routed to
+`cfunc_`. (Leg A — interpreter vs corpus — is the Phase-1 deliverable and is not re-gated per DRC
+PR, but `./mame -validate` and the interpreter leg must remain green.)
 
 ## Conventions
 
@@ -285,9 +293,13 @@ increment-1 "done." O repeats post-increment-1.
 
 ## Risks & assumptions
 
-- **R1 — the gate may not be reachable (blocks the phase).** If Phase 1, Task 5 cannot
-  reach strict m68000 cycle equality, Phase 2 cannot start. Mitigation: Task 1 verifies the
-  gate first and **stops** if red; escalate to Phase 1.
+- **R1 — the gate may not be reachable (retired by [ADR 0006](../adr/0006-m68000-oracle-gate-definition.md)).**
+  Originally: if Phase 1, Task 5 cannot reach strict m68000 cycle equality vs the corpus, Phase 2
+  cannot start. ADR 0006 established that strict equality vs the **MAME-derived** corpus was never
+  the right gate — the cycle-exactness Phase 2 needs is **Leg B (interpreter ≡ DRC)**, which is
+  **corpus-drift-immune** and does not depend on the corpus at all. Leg A is provenance-bounded by
+  a frozen allowlist. Mitigation: Task 1 still verifies the (now well-defined) gate first and
+  **stops** if red; but the prior "unreachable cycle equality" failure mode is removed.
 - **R2 — 68k prefetch/bus-timing edge cases.** Genuinely hard; expect a long `cfunc_` tail
   that shrinks slowly (ADR 0002). Mitigation: increment 1 deliberately limits native scope
   to the non-faulting user-mode common path; everything timing-subtle stays `cfunc_`.

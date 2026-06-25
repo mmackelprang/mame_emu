@@ -49,6 +49,16 @@ Phase 1 **produces** the gate Phase 2 consumes: the m68000 oracle (`./mametests
 **ratcheted per-CPU** — strict state+cycle equality enforced CPU-by-CPU starting with z80
 and m6502 (cleanest), then folding in m68000.
 
+> **Gate definition for m68000 — see [ADR 0006](../adr/0006-m68000-oracle-gate-definition.md).**
+> The m68000 corpus is **MAME-derived** (upstream: *"Generated using the microcoded core in
+> MAME"*, a 2024-08-01 snapshot), **not** an independent oracle like z80/m6502 — so naive "strict
+> cycle equality vs the full corpus" measures *drift from a stale self-snapshot*, not correctness.
+> ADR 0006 redefines the gate as **two legs**: **Leg A** (interpreter vs corpus — 100% state +
+> cycle equality except a frozen, provenance-cited allowlist of {TAS, TRAPV, address-error}
+> opcodes) and **Leg B** (interpreter ≡ DRC — full cycle equality, **corpus-drift-immune**, the
+> part Phase 2 actually needs). **Phase-1 Task 5 delivers Leg A (criteria 1+2); Leg B is a
+> Phase-2 deliverable.** The authority is the in-tree interpreter, never the corpus.
+
 ## Conventions (apply to every task)
 
 - New source files carry the MAME license header (two comment lines):
@@ -194,24 +204,43 @@ and m6502 (cleanest), then folding in m68000.
 - **Test/Validation:** `python tests/cpuoracle/fetch_vectors.py --cores m6502` then
   `./mametests "[m6502]"`. **Green:** all m6502 cases pass with cycle equality.
 
-### Task 5 — m68000 oracle (state-equality first; documented cycle adapter)
+### Task 5 — m68000 oracle (gate defined by [ADR 0006](../adr/0006-m68000-oracle-gate-definition.md): Leg A — state 100% + cycle-except-allowlist)
 
-- **Files (edit):** `tests/emu/cpu/cpuoracle.cpp` (add `[cpu][m68000]`);
-  `cpu_test_harness.{h,cpp}` (m68000 register-name map + the **sub-cycle single-step
-  loop**: the new microcode core steps `m_inst_state`/`m_inst_substate`, so step until
-  exactly one architectural instruction has retired); `scripts/src/tests.lua` (link the
-  m68000 device library).
+> **Gate authority resolved by [ADR 0006](../adr/0006-m68000-oracle-gate-definition.md).** The
+> m68000 corpus is **MAME-derived, not independent** — so the in-tree interpreter (`-drc 0`) is the
+> authority and the corpus is a conformance *probe*. Task 5 delivers **Leg A** of the 0006 gate
+> (criteria 1+2); **Leg B** (interpreter ≡ DRC) is a Phase-2 deliverable. Follow the **ADR 0006
+> §Close-out path** ordered checklist.
+
+- **Files (edit):** `tests/emu/cpu/cpuoracle.cpp` (add `[cpu][m68000]` + the frozen
+  cycle-divergence allowlist, single-sourced — model on the m6502 `k_jam_files`/`k_unstable_files`
+  pattern); `cpu_test_harness.{h,cpp}` (m68000 register-name map + `oracle_m68000_device` +
+  the **sub-cycle single-step loop**: the microcode core steps `m_inst_state`/`m_inst_substate`,
+  so step until exactly one architectural instruction has retired); `scripts/src/tests.lua` (link
+  the m68000 device library).
 - **Change:** Drive the **new microcode core** (`m68000_device::execute_run()`,
-  `src/devices/cpu/m68000/m68000.cpp:147`), not Musashi. Assert register/flag/memory
-  equality immediately. For cycles: reconcile MAME's icount (bus-cycle) model with the
-  corpus's bus-cycle model and **document the per-core cycle adapter** in a comment block
-  + `tests/cpuoracle/README.md`. Land **state-equality green first**; turn on
-  cycle-equality once the adapter is proven, ratcheting it in (this is the per-CPU ratchet
-  that Phase 2 will rely on — m68000 must reach strict cycle equality before Pick 2's DRC
-  work, per ADR 0002 §5).
+  `src/devices/cpu/m68000/m68000.cpp:147`), not Musashi.
+  - **Blocker #1 (PC offset) is a harness adapter, not a core question:** the corpus PC field is
+    set from MAME's `m_au` ("next prefetch address" = start + 4), while `STATE_GENPC` exports
+    `m_pc` (= start + 2). **Read the retired PC from `m_au`** (or apply a documented `+2` adapter
+    to the exported PC). Confirmed by the import path (`m68000.cpp:366-367`: `m_pc = m_ipc+2`,
+    `m_au = m_ipc+4`), which also seeds the prefetch pipeline from `m_ipc`, so **apply RAM before
+    PC** (same ordering rule the 6502 leg proved).
+  - **Leg A — state: 100%, no allowlist.** Assert register (D0–D7, A0–A7/USP/SP) + flag (CCR/SR)
+    + RAM equality across the full corpus.
+  - **Leg A — cycles: 100% except the frozen allowlist** = {TAS, TRAPV, address-error (`re`/`we`)
+    cases}, each entry carrying a one-line provenance citation (upstream STATUS / cycle-type note).
+    Reconcile MAME's icount (bus-cycle) model with the corpus and **document the adapter** in a
+    comment block + `tests/cpuoracle/README.md`, including the MAME-derived provenance and the
+    authority asymmetry vs z80/m6502.
+  - **Never edit the interpreter to match the corpus** — a non-allowlisted cycle mismatch is
+    either traced to corpus drift (allowlist *only* with a provenance citation) or fixed as a real
+    oracle finding for the maintainer.
 - **Test/Validation:** `python tests/cpuoracle/fetch_vectors.py --cores m68000` then
-  `./mametests "[m68000]"`. **Green (step 1):** register/flag/memory equality passes.
-  **Green (step 2, ratchet):** cycle equality passes with the documented adapter.
+  `./mametests "[m68000]"`. **Green = ADR 0006 acceptance criteria 1 + 2:** 100% state equality
+  (interpreter vs corpus), and 100%-minus-allowlist cycle equality, with every allowlisted file
+  covered by a rationale and a `WARN(...)` totals line. (Criterion 3 / Leg B is satisfied
+  vacuously here — no DRC yet — and becomes a hard requirement in Phase 2.)
 
 > **PR boundary C** (Tasks 4–5): m6502 + m68000 oracles. The m68000 cycle-adapter is the
 > hand-off artifact Phase 2 depends on — flag it explicitly in the PR description.
@@ -511,8 +540,10 @@ oracle). Task 0 (install `make`) precedes everything.
 ## Definition of Done (Phase 1)
 
 1. GNU `make` installed; iteration loop verified (Task 0).
-2. z80 + m6502 + m68000 oracle green in CI on all three OSes; m68000 reaches **strict
-   state + cycle equality** (the Phase-2 gate). `mametests` and `srcclean` wired and green.
+2. z80 + m6502 + m68000 oracle green in CI on all three OSes; m68000 reaches the
+   **[ADR 0006](../adr/0006-m68000-oracle-gate-definition.md) Leg-A bar** (criteria 1+2: 100%
+   state equality + cycle equality except the frozen provenance-cited allowlist) — the Phase-1
+   half of the Phase-2 gate. `mametests` and `srcclean` wired and green.
 3. Pick 3 golden CLI tests green; internal-UI items (C1–C4, B2) manually verified;
    English-source strings added via `_()`; `srcclean` clean.
 4. Pick 5 staleness detector + `reconcilelist --fix` land with green pytest; fast
@@ -521,10 +552,16 @@ oracle). Task 0 (install `make`) precedes everything.
 
 ## Risks & assumptions
 
-- **R1 — m68000 cycle-adapter (highest).** The microcode core's icount/bus-cycle model may
-  not map 1:1 to the corpus. Mitigation: land state-equality first, ratchet cycle-equality
-  behind a documented adapter (Task 5). **This adapter is the artifact Phase 2 inherits** —
-  if cycle-equality cannot be reached, Phase 2's hard gate is at risk; surface early.
+- **R1 — m68000 cycle-adapter (was "highest"; downgraded by [ADR 0006](../adr/0006-m68000-oracle-gate-definition.md)).**
+  The microcode core's icount/bus-cycle model may not map 1:1 to the **MAME-derived** corpus —
+  and ADR 0006 established that strict cycle equality vs that stale 2024 self-snapshot was never
+  the right gate. Mitigation (resolved): the PC offset (blocker #1) is a harness `m_au` adapter,
+  not a core issue; the documented-divergent set (TAS/TRAPV/address-error) is a frozen,
+  provenance-cited allowlist; and the cycle-exactness Phase 2 needs lives in **Leg B**
+  (interpreter ≡ DRC), which is **corpus-drift-immune**. The phase risk that "the gate may be
+  unreachable" is thereby retired: Leg A is provenance-bounded and Leg B doesn't depend on the
+  corpus at all. Surface any residual non-allowlisted cycle mismatch as an oracle finding (a real
+  core fix), not an allowlist expansion.
 - **R2 — CI network/corpus access.** Runners may block outbound fetch. Mitigated by the
   manifest's mirror fallback (Task 1) and caching the pinned tag; CI fetch source must be
   pinned to a reachable mirror.
