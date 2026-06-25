@@ -50,8 +50,40 @@
 >       (changing them is shared-core behaviour). Notably the unstable high-byte
 >       ops (SHA/SHX/SHY/TAS, `0x93/9B/9C/9E/9F`) all *pass*, so the skip list is
 >       minimal and evidence-based.
-> - **Remaining (later PR boundaries):** m68000 leg (rest of C), CI wiring of
->   `mametests` + `srcclean` (D), oracle docs (Task 8).
+>   - **m68000 leg (Task 5) — infrastructure landed; strict gate BLOCKED for review.**
+>     `[cpu][m68000]` case + `oracle_m68000_device` driving the **new microcode core**
+>     (`m68000_device::execute_run()`, not Musashi) + the m68000 register map
+>     (`d0–d7/a0–a6/usp/ssp/sr/pc`). The fetcher gained an **in-tree decoder** for the
+>     m68000 corpus's custom binary `.json.bin` container (the corpus is NOT plain
+>     JSON; `manifest.json` marks it `"format": "m68000_bin"`), emitting harness-uniform
+>     JSON. Adapters landed: **PC/prefetch-pointer adapter** (write `GENPC = corpus_pc-4`,
+>     read `m_pc+2` — the corpus `pc` addresses the word after the 2-word prefetch
+>     queue), **SR-before-a7 ordering** (`state_import(SR)` → `update_user_super()`
+>     selects USP/SSP + program space), **RAM-before-registers** (eager prefetch on
+>     PC-write), and the **microcode sub-cycle single-step** (grant one cycle at a time,
+>     retire on the `m_ipc` change; the cycle adapter is the identity = corpus `length`).
+>     The leg runs **all 127 fixtures / 317 500 cases end-to-end** as a GREEN smoke; the
+>     hard strict-equality `REQUIRE`s are gated behind `CPUORACLE_M68_STRICT=1`.
+>     **Strict equality is NOT yet achieved** — three diagnosed blockers, surfaced for
+>     the coordinator/Phase-2 owner (the artifact ADR 0002's DRC port consumes):
+>     1. **Corpus version drift** — the SingleStepTests/m68000 corpus is generated from
+>        MAME's microcode core but pins NO MAME version; its README says "any bugs that
+>        exist in MAME's microcoded M68000 emulator will exist here too" and flags TAS
+>        timing, TRAPV/S-bit and address-error handling as known-divergent. This tree's
+>        core differs from the generating one, so a subset of instructions disagree.
+>     2. **Deferred trace exception** — a case with `SR.T` set is snapshotted by the
+>        corpus *before* the trace exception the microcode schedules at the instruction's
+>        final step; the single-step retires after the trace entry runs, and the dirtied
+>        state leaks across cases.
+>     3. **First-instruction prefetch priming** — the very first instruction after
+>        machine start carries a +1-cycle / PC-offset artifact (cold prefetch pipeline).
+>     The harness, binary decoder and adapters are correct (they reproduce warmed,
+>     non-exception cases exactly); the blockers are **core/corpus reconciliation, not
+>     harness defects**. Decision needed: re-pin the corpus to the matching MAME revision
+>     (and/or model the deferred trace + priming) before m68000 can serve as the Phase-2
+>     strict cycle gate. **PR 2 is NOT merged — it awaits this review.**
+> - **Remaining (later PR boundaries):** m68000 strict-equality close-out (rest of C),
+>   CI wiring of `mametests` + `srcclean` (D), oracle docs (Task 8).
 
 ## Context
 

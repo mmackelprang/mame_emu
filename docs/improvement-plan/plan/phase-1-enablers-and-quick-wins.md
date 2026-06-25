@@ -194,7 +194,28 @@ and m6502 (cleanest), then folding in m68000.
 - **Test/Validation:** `python tests/cpuoracle/fetch_vectors.py --cores m6502` then
   `./mametests "[m6502]"`. **Green:** all m6502 cases pass with cycle equality.
 
-### Task 5 — m68000 oracle (state-equality first; documented cycle adapter)
+### Task 5 — m68000 oracle (state-equality first; documented cycle adapter) 🚫 BLOCKED — infra landed, strict gate awaits review (PR boundary C, PR 2)
+
+> **Status:** The full m68000 harness path is **built and runs end-to-end** (PR 2,
+> NOT merged): `oracle_m68000_device` drives the new microcode core; the fetcher
+> decodes the corpus's custom binary `.json.bin` container to JSON; the PC/prefetch
+> (`GENPC = pc-4` in, `m_pc+2` out), SR-before-a7, RAM-before-registers and microcode
+> sub-cycle single-step adapters are in place. The leg ships as a **GREEN smoke** over
+> all 127 fixtures / 317.5k cases, with strict `REQUIRE`s gated behind
+> `CPUORACLE_M68_STRICT=1`. **Strict state+cycle equality is NOT yet reached**, blocked
+> on three diagnosed items that need a coordinator/Phase-2-owner decision (full writeup
+> in ADR 0001 / the PR description):
+> 1. **Corpus version drift** — the pinned SingleStepTests/m68000 corpus was generated
+>    from an *unversioned* MAME microcode core ("any bugs … will exist here too"; TAS /
+>    TRAPV / address-error flagged divergent) and differs from this tree's core.
+> 2. **Deferred trace exception** (SR.T cases captured pre-trace) leaks across cases.
+> 3. **First-instruction prefetch priming** (+1-cycle / PC-offset on the cold first step).
+>
+> **The harness + decoder + adapters are correct** (they reproduce warmed, non-exception
+> cases exactly). The Phase-2 strict-cycle gate (ADR 0002 §5) depends on closing these —
+> the likely path is **re-pinning the corpus to the MAME revision that matches this tree**
+> (and modelling the deferred trace + priming). This is the artifact the task flagged to
+> surface for review rather than merge.
 
 - **Files (edit):** `tests/emu/cpu/cpuoracle.cpp` (add `[cpu][m68000]`);
   `cpu_test_harness.{h,cpp}` (m68000 register-name map + the **sub-cycle single-step
