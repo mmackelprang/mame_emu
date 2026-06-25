@@ -224,10 +224,27 @@ bool menu_audit::do_audit()
 			enumerator.next();
 			media_auditor auditor(enumerator);
 			media_auditor::summary const summary(auditor.audit_media(AUDIT_VALIDATE_FAST));
-			info.available = (summary == media_auditor::CORRECT) || (summary == media_auditor::BEST_AVAILABLE) || (summary == media_auditor::NONE_NEEDED);
 
 			// if everything looks good, include the driver
 			info.available = (summary == media_auditor::CORRECT) || (summary == media_auditor::BEST_AVAILABLE) || (summary == media_auditor::NONE_NEEDED);
+
+			// surface (rather than discard) the per-ROM detail for systems that
+			// failed the audit: re-walk the records that audit_media() already
+			// gathered, formatting each file's reason (NOT FOUND, INCORRECT
+			// CHECKSUM, etc.) to the log so the user has an actionable record of
+			// why each system is unavailable instead of only the pass/fail bit
+			if (!info.available && !auditor.records().empty())
+			{
+				std::ostringstream detail;
+				util::stream_format(detail, _("Audit of system %1$s (%2$s) failed:\n"), info.driver->type.fullname(), info.driver->name);
+				auditor.summarize(info.driver->name, &detail);
+
+				// do_audit() runs concurrently on several worker threads; the
+				// global osd_printf sink is not synchronised, so serialise the
+				// emit and keep each system's detail block contiguous in the log
+				std::lock_guard<std::mutex> guard(m_log_mutex);
+				osd_printf_info("%s", std::move(detail).str());
+			}
 			++m_audited;
 		}
 	}
