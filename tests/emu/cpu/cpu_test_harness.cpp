@@ -49,6 +49,7 @@
 #include "cpu_test_harness.h"
 
 #include "cpu/z80/z80.h"
+#include "cpu/m6502/m6502.h"
 
 #include "emuopts.h"
 #include "ioport.h"
@@ -84,8 +85,9 @@ constexpr u32 Z80_INSTRUCTION_BOUNDARY = 0xffff00;
 // m_icountptr is a protected member of device_execute_interface, run() is a
 // public method of the same interface, and m_ref is a protected member of
 // z80_device, so all three are reachable from a z80_device subclass without
-// friending or touching the scheduler.
-class oracle_z80_device : public z80_device
+// friending or touching the scheduler.  It also implements oracle_stepper so
+// the harness can drive it without knowing the concrete type.
+class oracle_z80_device : public z80_device, public cpuoracle::oracle_stepper
 {
 public:
 	oracle_z80_device(const machine_config &mconfig, const char *tag, device_t *owner, u32 clock);
@@ -166,6 +168,11 @@ public:
 	//
 	// m_f is a protected z80_device member, reachable from this subclass.
 	void set_q(u8 q) { m_f.qtemp = u8(~q); }
+
+	// oracle_stepper
+	virtual int oracle_step(int budget) override { return step_instruction(budget); }
+	virtual void oracle_prepare_case() override { clear_quirk_state(); }
+	virtual void oracle_set_quirk_q(uint8_t q) override { set_q(q); }
 };
 
 DECLARE_DEVICE_TYPE(ORACLE_Z80, oracle_z80_device)
@@ -173,6 +180,139 @@ DEFINE_DEVICE_TYPE(ORACLE_Z80, oracle_z80_device, "oracle_z80", "CPU Oracle Z80"
 
 oracle_z80_device::oracle_z80_device(const machine_config &mconfig, const char *tag, device_t *owner, u32 clock) :
 	z80_device(mconfig, ORACLE_Z80, tag, owner, clock)
+{
+}
+
+
+//**************************************************************************
+//  M6502 ORACLE DEVICE
+//**************************************************************************
+//
+//  The m6502 core, like the z80, is a sub-cycle state machine: execute_run()
+//  loops while m_icount > 0, and each architectural instruction is charged
+//  cycle-by-cycle through the generated do_exec_full()/do_exec_partial()
+//  bodies.  Two facts make single-stepping it identical in spirit to z80:
+//
+//   * Writing PC through the state interface (state_import, M6502_PC) re-parks
+//     the core on an instruction boundary: it prefetches the opcode
+//     (m_IR = read_sync(m_PC)) and decodes m_inst_state, with m_inst_substate
+//     left at 0.
+//   * The 6502 prefetches the *next* opcode as the final memory cycle of the
+//     current instruction (the generated `prefetch()` expands to a
+//     read_sync(m_PC) that IS charged a cycle), exactly as the SingleStepTests
+//     corpus counts it.  So len(cycles) == the icount the core consumes.
+//
+//  The instruction boundary marker is m_inst_substate == 0: a fully retired
+//  instruction leaves substate 0 (the generated _partial() sets it to 0 on
+//  reaching `break`, and the trailing prefetch tail runs as a zero-cost step).
+//  Mid-instruction it is non-zero (the substate to resume from).
+
+class oracle_m6502_device : public m6502_device, public cpuoracle::oracle_stepper
+{
+public:
+	oracle_m6502_device(const machine_config &mconfig, const char *tag, device_t *owner, u32 clock);
+
+	// Run exactly one architectural instruction and return the cycles its
+	// body consumed (the icount the core charges), measured independently of
+	// the fixture's count.  `budget` is accepted for signature symmetry with
+	// the z80 leg but not trusted.
+	//
+	// Unlike the z80 core, the m6502 fetches the opcode *eagerly* in
+	// state_import (writing PC prefetches m_IR and decodes m_inst_state), so
+	// when execute_run() is entered the body charges only the post-opcode bus
+	// cycles.  The instruction is bounded by m_inst_substate: it is 0 on an
+	// instruction boundary and non-zero mid-instruction.  We therefore drive
+	// the core one cycle at a time and stop the instant it returns to a
+	// boundary (substate 0) having charged at least one cycle -- i.e. just as
+	// the body's final bus cycle (the prefetch of the *next* opcode) completes,
+	// before execute_run() would start decoding that next instruction.  This
+	// can never run past the end of the instruction, and the caller applies the
+	// per-core cycle adapter (see cpuoracle.cpp) to reconcile this body count
+	// with the corpus's full bus-cycle count.
+	int step_instruction(int budget)
+	{
+		(void)budget;
+		int consumed = 0;
+
+		// Phase 1 -- move the core off the instruction boundary.  Granting one
+		// cycle lets execute_run() decode the (already-prefetched) opcode and run
+		// the body's first charged bus cycle: a MEMORY step does m_icount-- and,
+		// on reaching <= 0, stows the resume substate and returns.  In practice
+		// this loop runs exactly once for every real opcode -- the first charged
+		// cycle takes m_inst_substate from 0 to non-zero, so the `== 0` guard
+		// fails immediately afterwards.  The bounded loop is a safety net for a
+		// hypothetical core whose first run() does not advance the substate (it
+		// must never spin).
+		int guard = 0;
+		while (m_inst_substate == 0 && guard < 64)
+		{
+			*m_icountptr = 1;
+			run();
+			consumed += 1 - *m_icountptr;
+			++guard;
+		}
+
+		// Phase 2 -- flush the zero-cost tail (prefetch_end's PC++ and the
+		// switch fall-through that resets m_inst_substate to 0) while holding
+		// the counter non-positive, so execute_run()'s `while (m_icount > 0)`
+		// loop can never start decoding the *next* instruction.  An honestly
+		// cycle-charging step here (would only happen if phase 1 mis-stopped)
+		// drives the counter negative and is folded into `consumed`.
+		while (m_inst_substate != 0 && guard < 128)
+		{
+			if (*m_icountptr > 0)
+				*m_icountptr = 0;
+			const int before = *m_icountptr;
+			run();
+			consumed += before - *m_icountptr;
+			++guard;
+		}
+
+		return consumed;
+	}
+
+	// Clear the cross-instruction state a SingleStepTests fixture does not
+	// carry: pending/asserted interrupt and set-overflow lines.  The corpus
+	// runs each case with no external lines active, so a prior case's pending
+	// NMI (or a latched IRQ/SO edge) must not leak into this one.
+	//
+	// Crucially we also force m_inst_substate back to 0 (an instruction
+	// boundary).  Writing PC through the state interface re-decodes
+	// m_inst_state but does NOT reset m_inst_substate, so a previous case that
+	// left the core mid-instruction -- in particular a JAM/KIL opcode (0x02,
+	// 0x12, ...), whose body is an infinite read loop that never retires and
+	// which our stepper abandons via its guard cap with substate != 0 -- would
+	// otherwise make the next case resume from that stale substate and execute
+	// garbage.  Zeroing it here guarantees every case starts on a clean
+	// instruction boundary.
+	void clear_quirk_state()
+	{
+		m_nmi_pending = false;
+		m_nmi_state = false;
+		m_irq_state = false;
+		m_apu_irq_state = false;
+		m_v_state = false;
+		m_irq_taken = false;
+		m_inhibit_interrupts = false;
+		m_inst_substate = 0;
+		// also clear the SYNC (opcode-fetch in progress) latch: a case abandoned
+		// mid-instruction (e.g. via the stepper guard cap) could leave it set,
+		// and the next case's prefetch_start() would then re-assert SYNC without
+		// an intervening clear.  Harmless today (no SYNC callback is wired) but
+		// matches device_reset()'s cleanup for defensive completeness.
+		m_sync = false;
+	}
+
+	// oracle_stepper
+	virtual int oracle_step(int budget) override { return step_instruction(budget); }
+	virtual void oracle_prepare_case() override { clear_quirk_state(); }
+};
+
+DECLARE_DEVICE_TYPE(ORACLE_M6502, oracle_m6502_device)
+DEFINE_DEVICE_TYPE(ORACLE_M6502, oracle_m6502_device, "oracle_m6502", "CPU Oracle M6502")
+
+oracle_m6502_device::oracle_m6502_device(const machine_config &mconfig, const char *tag, device_t *owner, u32 clock) :
+	m6502_device(mconfig, ORACLE_M6502, tag, owner, clock)
 {
 }
 
@@ -240,6 +380,55 @@ void oracle_z80_state::machine_reset()
 {
 	// Every device is started and reset and the scheduler is idle.  Hand the
 	// CPU to the harness, then ask the machine to exit so run() returns.
+	if (g_reset_hook)
+		g_reset_hook(machine(), *m_cpu);
+	machine().schedule_exit();
+}
+
+
+//**************************************************************************
+//  M6502 ORACLE DRIVER
+//**************************************************************************
+
+class oracle_m6502_state : public driver_device
+{
+public:
+	oracle_m6502_state(const machine_config &mconfig, device_type type, const char *tag) :
+		driver_device(mconfig, type, tag),
+		m_cpu(*this, "maincpu")
+	{
+	}
+
+	void m6502_machine(machine_config &config) ATTR_COLD;
+
+	// keep the search path empty so we never touch the filesystem
+	virtual std::vector<std::string> searchpath() const override { return std::vector<std::string>(); }
+
+protected:
+	virtual void machine_reset() override ATTR_COLD;
+
+private:
+	void m6502_map(address_map &map) ATTR_COLD;
+
+	required_device<oracle_m6502_device> m_cpu;
+};
+
+
+void oracle_m6502_state::m6502_map(address_map &map)
+{
+	// 64 KiB of flat RAM covering the whole 16-bit 6502 address space.  The
+	// 6502 has no separate I/O space; every access goes through AS_PROGRAM.
+	map(0x0000, 0xffff).ram();
+}
+
+void oracle_m6502_state::m6502_machine(machine_config &config)
+{
+	ORACLE_M6502(config, m_cpu, 1_MHz_XTAL);
+	m_cpu->set_addrmap(AS_PROGRAM, &oracle_m6502_state::m6502_map);
+}
+
+void oracle_m6502_state::machine_reset()
+{
 	if (g_reset_hook)
 		g_reset_hook(machine(), *m_cpu);
 	machine().schedule_exit();
@@ -358,12 +547,19 @@ INPUT_PORTS_END
 ROM_START( oraclez80 )
 ROM_END
 
+static INPUT_PORTS_START( oraclem6502 )
+INPUT_PORTS_END
+
+ROM_START( oraclem6502 )
+ROM_END
+
 
 //**************************************************************************
 //  GAME DRIVER REGISTRATION (global scope)
 //**************************************************************************
 
 GAME( 2026, oraclez80, 0, z80_machine, oraclez80, oracle_z80_state, empty_init, ROT0, "MAME", "CPU Oracle z80 fixture", MACHINE_NO_SOUND | MACHINE_IS_BIOS_ROOT )
+GAME( 2026, oraclem6502, 0, m6502_machine, oraclem6502, oracle_m6502_state, empty_init, ROT0, "MAME", "CPU Oracle m6502 fixture", MACHINE_NO_SOUND | MACHINE_IS_BIOS_ROOT )
 
 
 namespace cpuoracle {
@@ -410,6 +606,37 @@ const cpu_core_descriptor &z80_core_descriptor()
 		"z80",
 		&GAME_NAME(oraclez80),
 		s_z80_regmap
+	};
+	return desc;
+}
+
+
+//**************************************************************************
+//  M6502 CORE DESCRIPTOR
+//**************************************************************************
+
+// Fixture field -> m6502 state index.  The SingleStepTests 6502 corpus names
+// its registers pc/s/a/x/y/p; MAME exposes them as M6502_PC/S/A/X/Y/P through
+// the state interface.  The whole architectural state of a 6502 is these six
+// registers plus RAM, so every fixture field is mapped and asserted.
+static const reg_map_entry s_m6502_regmap[] =
+{
+	{ "pc", M6502_PC },
+	{ "s",  M6502_S  },
+	{ "a",  M6502_A  },
+	{ "x",  M6502_X  },
+	{ "y",  M6502_Y  },
+	{ "p",  M6502_P  },
+	{ nullptr, 0 }
+};
+
+const cpu_core_descriptor &m6502_core_descriptor()
+{
+	static const cpu_core_descriptor desc =
+	{
+		"m6502",
+		&GAME_NAME(oraclem6502),
+		s_m6502_regmap
 	};
 	return desc;
 }
@@ -464,7 +691,12 @@ bool cpu_test_harness::run_with_machine(const std::function<void ()> &body)
 			[this, &body, &ran] (running_machine &machine, cpu_device &cpu)
 			{
 				m_cpu = &cpu;
+				// Every oracle CPU device also implements oracle_stepper; recover
+				// it once here so the single-step/quirk primitives dispatch
+				// generically (no per-core downcast in the harness body).
+				m_stepper = dynamic_cast<oracle_stepper *>(&cpu);
 				body();
+				m_stepper = nullptr;
 				m_cpu = nullptr;
 				ran = true;
 				machine.schedule_exit();
@@ -524,17 +756,17 @@ uint8_t cpu_test_harness::read_io(uint32_t address) const
 
 int cpu_test_harness::step_one_instruction(int budget)
 {
-	return downcast<oracle_z80_device &>(*m_cpu).step_instruction(budget);
+	return m_stepper->oracle_step(budget);
 }
 
 void cpu_test_harness::prepare_case()
 {
-	downcast<oracle_z80_device &>(*m_cpu).clear_quirk_state();
+	m_stepper->oracle_prepare_case();
 }
 
 void cpu_test_harness::set_quirk_q(uint8_t q)
 {
-	downcast<oracle_z80_device &>(*m_cpu).set_q(q);
+	m_stepper->oracle_set_quirk_q(q);
 }
 
 } // namespace cpuoracle
@@ -552,13 +784,16 @@ void cpu_test_harness::set_quirk_q(uint8_t q)
 
 GAME_EXTERN(___empty);
 
+// Must be sorted by short name (driver_list uses binary search): '_' (0x5f)
+// sorts before lowercase letters, and "oraclem6502" < "oraclez80".
 const game_driver * const driver_list::s_drivers_sorted[] =
 {
 	&GAME_NAME(___empty),
+	&GAME_NAME(oraclem6502),
 	&GAME_NAME(oraclez80),
 };
 
-std::size_t const driver_list::s_driver_count = 2;
+std::size_t const driver_list::s_driver_count = 3;
 
 // emulator_info stubs -- none of these is exercised by the oracle path, but
 // the symbols must resolve to link the emu library without the frontend.

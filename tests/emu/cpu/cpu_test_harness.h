@@ -16,7 +16,7 @@
     The harness is written to be reusable across CPU cores: a core is
     described by a cpu_core_descriptor (a device type plus a table mapping
     fixture register-field names to device_state_interface state indices).
-    Only the z80 leg is implemented here; m6502/m68000 descriptors are
+    The z80 and m6502 legs are implemented here; the m68000 descriptor is
     intentionally out of scope for this PR.
 
 ***************************************************************************/
@@ -54,6 +54,34 @@ struct reg_map_entry
 {
 	const char *json_field;     // key as it appears in the SingleStepTests JSON
 	int         state_index;    // device_state_interface state index
+};
+
+// Per-core single-step + cross-instruction-state primitives.
+//
+// Each oracle CPU device subclass also implements this interface so the
+// harness can drive "run exactly one instruction" and reset the
+// cross-instruction quirk state generically, without the harness having to
+// know the concrete device type.  The harness recovers the interface from the
+// live cpu_device via dynamic_cast (every oracle device multiply-inherits it).
+class oracle_stepper
+{
+public:
+	virtual ~oracle_stepper() = default;
+
+	// Run exactly one architectural instruction, granting `budget` cycles
+	// (the fixture's expected count), and return the number consumed.  The
+	// CPU must be parked on an instruction boundary on entry (true after a
+	// reset or after the PC is written through the state interface).
+	virtual int oracle_step(int budget) = 0;
+
+	// Clear cross-instruction quirk state a SingleStepTests fixture does not
+	// carry (e.g. a HALT latch, pending NMI), so each case starts clean.
+	// No-op for cores without such state.
+	virtual void oracle_prepare_case() { }
+
+	// Seed a core-specific quirk input not exposed through the state
+	// interface (the z80 SCF/CCF "Q" byte).  No-op for cores without one.
+	virtual void oracle_set_quirk_q(uint8_t) { }
 };
 
 // Describes one CPU core: how to register its driver and how to translate
@@ -155,6 +183,7 @@ public:
 private:
 	const cpu_core_descriptor &m_desc;
 	std::map<std::string, int> m_field_to_index;
+	oracle_stepper *m_stepper = nullptr;   // the live CPU's stepper interface
 
 	// osd_interface has a protected destructor, so the OSD is owned through
 	// a unique_ptr with a custom deleter that knows the concrete test OSD
@@ -174,6 +203,13 @@ private:
 
 // Returns the descriptor for the z80 oracle core.
 const cpu_core_descriptor &z80_core_descriptor();
+
+//**************************************************************************
+//  M6502 LEG
+//**************************************************************************
+
+// Returns the descriptor for the m6502 oracle core.
+const cpu_core_descriptor &m6502_core_descriptor();
 
 } // namespace cpuoracle
 

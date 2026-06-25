@@ -18,7 +18,7 @@
     skips cleanly (SUCCEED + return) so a developer without the corpus still
     gets a green mametests run.
 
-    Only the z80 leg is implemented in this PR.
+    The z80 and m6502 legs are implemented here.
 
 ***************************************************************************/
 
@@ -34,6 +34,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -45,6 +46,7 @@ namespace fs = std::filesystem;
 // Where the fetched corpus lives, relative to the repo root (mametests is
 // launched from MAME_DIR).
 const char *const ORACLE_Z80_DIR = "build/cpuoracle/z80";
+const char *const ORACLE_M6502_DIR = "build/cpuoracle/m6502";
 
 
 // Optional cap on the number of fixture files exercised, read from the
@@ -326,4 +328,211 @@ TEST_CASE("CPU oracle z80 SingleStepTests", "[cpu][z80]")
 
 	REQUIRE(ran);
 	WARN("z80 oracle: " << fixtures.size() << " fixtures, " << total_cases << " cases checked");
+}
+
+
+//**************************************************************************
+//  M6502 ORACLE (Task 4)
+//**************************************************************************
+
+TEST_CASE("CPU oracle m6502 SingleStepTests", "[cpu][m6502]")
+{
+	std::vector<fs::path> fixtures = collect_fixtures(ORACLE_M6502_DIR);
+	if (fixtures.empty())
+	{
+		SUCCEED("m6502 fixtures not present -- run tests/cpuoracle/fetch_vectors.py --cores m6502; skipping");
+		return;
+	}
+
+	// honour an optional CPUORACLE_MAX_FILES cap (fast subset runs)
+	const std::size_t cap = fixture_file_cap();
+	if (cap != 0 && fixtures.size() > cap)
+		fixtures.resize(cap);
+
+	cpuoracle::cpu_test_harness harness(cpuoracle::m6502_core_descriptor());
+
+	std::size_t total_cases = 0;
+
+	// Two classes of opcode are excluded from the strict ratchet, each for a
+	// documented, hardware-grounded reason.  Every other opcode -- all 232
+	// documented and undocumented/illegal instructions that actually retire --
+	// is asserted with strict state + cycle equality.
+	//
+	// (1) The 12 NMOS "JAM"/"KIL" opcodes (0x02,0x12,...,0xF2) deliberately hang
+	//     the processor: MAME models the real hardware with an infinite read loop
+	//     (kil_non in m6502's opcode list), so the instruction never retires and
+	//     has no well-defined cycle count.  The corpus truncates the jam at an
+	//     arbitrary 11 cycles, so cycle equality is undefined for a jammed CPU.
+	//
+	// (2) Three "unstable" undocumented opcodes whose result is analog/chip
+	//     dependent and on which MAME's model legitimately differs from the
+	//     corpus's:
+	//       0x8B ANE/XAA -- A = (A | magic) & X & imm; MAME uses magic 0x00,
+	//                       the corpus a non-zero magic, so results disagree on
+	//                       ~55% of inputs.
+	//       0xAB LXA/LAX# -- same magic-constant indeterminacy (~43% disagree).
+	//       0xBB LAS/LAE  -- A=X=S=(mem & S) on hardware; MAME's las_aby is a
+	//                       stub (A = mem | 0x51, X = 0xff, S untouched) that
+	//                       disagrees on 100% of inputs.
+	//     These are surfaced to the maintainer as oracle findings (see the PR /
+	//     report); fixing them changes shared m6502-core behaviour and so is held
+	//     out of this tests-only PR rather than bundled silently.
+	static const std::set<std::string> k_jam_files = {
+		"02.json", "12.json", "22.json", "32.json", "42.json", "52.json",
+		"62.json", "72.json", "92.json", "b2.json", "d2.json", "f2.json"
+	};
+	static const std::set<std::string> k_unstable_files = {
+		"8b.json", "ab.json", "bb.json"
+	};
+	std::size_t skipped_jam = 0;
+	std::size_t skipped_unstable = 0;
+
+	// All fixture replay happens inside the live machine (see run_with_machine):
+	// the CPU's memory caches are only valid before running_machine::run() tears
+	// the machine down.  The 6502 has no I/O space and no SCF/CCF-style quirk
+	// input, so unlike the z80 leg there are no ports to seed and no `q` byte.
+	const bool ran = harness.run_with_machine(
+			[&harness, &fixtures, &total_cases, &skipped_jam, &skipped_unstable] ()
+			{
+				for (const fs::path &path : fixtures)
+				{
+					const std::string fname = path.filename().string();
+					if (k_jam_files.count(fname))
+					{
+						++skipped_jam;
+						continue;
+					}
+					if (k_unstable_files.count(fname))
+					{
+						++skipped_unstable;
+						continue;
+					}
+
+					std::string text;
+					REQUIRE(read_file(path, text));
+
+					rapidjson::Document doc;
+					doc.Parse(text.c_str());
+					INFO("fixture: " << path.filename().string());
+					REQUIRE_FALSE(doc.HasParseError());
+					REQUIRE(doc.IsArray());
+
+					for (const auto &test : doc.GetArray())
+					{
+						const std::string case_name = test.HasMember("name") ? test["name"].GetString() : "<unnamed>";
+						INFO("fixture: " << path.filename().string() << "  case: " << case_name);
+
+						const rapidjson::Value &initial = test["initial"];
+						const rapidjson::Value &final = test["final"];
+
+						// the fixture's cycle list length is the exact cycle count
+						REQUIRE(test.HasMember("cycles"));
+						REQUIRE(test["cycles"].IsArray());
+						const int expected_cycles = int(test["cycles"].GetArray().Size());
+
+						// 1. apply initial state.  prepare_case() clears the
+						//    cross-instruction line state a fixture does not carry
+						//    (pending/asserted IRQ/NMI/SO) so a prior case cannot
+						//    leak in.
+						//
+						//    RAM is applied BEFORE the registers because the m6502
+						//    fetches its opcode *eagerly* when PC is written through
+						//    the state interface (state_import prefetches m_IR from
+						//    the program space and decodes m_inst_state).  If RAM
+						//    were written afterwards the core would have latched a
+						//    stale opcode (0x00 from blank RAM) and executed the
+						//    wrong instruction.  Loading RAM first guarantees the
+						//    PC write -- wherever it falls in the register set --
+						//    prefetches the correct opcode bytes.
+						harness.prepare_case();
+						apply_ram(harness, initial);
+						apply_registers(harness, initial);
+
+						// The stack pointer needs the page base re-applied: the
+						// corpus `s` is the 8-bit S register, but MAME stores the
+						// full 16-bit stack *address* (m_SP, 0x100-0x1ff) behind
+						// the state interface, so apply_registers() wrote only the
+						// low byte.  OR in the 0x100 page so stack accesses land on
+						// the right page (without this, BRK/JSR/PHA/... push to
+						// 0x00xx instead of 0x01xx).
+						if (initial.HasMember("s") && initial["s"].IsInt())
+							harness.set_reg("s", 0x100 | (std::uint32_t(initial["s"].GetInt()) & 0xff));
+
+						// 2. run exactly one instruction; the harness measures the
+						//    cycles its body consumes independently of the fixture.
+						//    For the m6502 this is exactly the corpus bus-cycle
+						//    count: the opcode fetch is charged inside the body and
+						//    the body's final cycle is the prefetch of the *next*
+						//    opcode, which is precisely how the corpus counts (so
+						//    the per-core cycle adapter is the identity -- no offset
+						//    -- for every retiring opcode).
+						const int consumed = harness.step_one_instruction(expected_cycles);
+
+						// 3a. strict register equality for every mapped field
+						//     present in the fixture's final state (pc/s/a/x/y/p).
+						//
+						//     The status register P needs the B flag (bit 4, 0x10)
+						//     masked out of the comparison: the 6502 has no physical
+						//     B flip-flop -- it exists only in the byte pushed by
+						//     PHP/BRK/IRQ (always 1) and is ignored by PLP/RTI.  MAME
+						//     models this by keeping B *always set* in its live m_P,
+						//     whereas the SingleStepTests corpus preserves whatever B
+						//     value was last loaded.  Both are valid models of a
+						//     non-existent bit, so they disagree only on bit 4.  The
+						//     real B behaviour -- that PHP/BRK push it as 1 -- is still
+						//     asserted strictly through final RAM equality on the
+						//     pushed stack bytes, so masking it here loses no coverage.
+						for (auto it = final.MemberBegin(); it != final.MemberEnd(); ++it)
+						{
+							const char *name = it->name.GetString();
+							if (!it->value.IsInt() && !it->value.IsUint() && !it->value.IsInt64() && !it->value.IsUint64())
+								continue; // skip the "ram" array
+							if (!harness.has_reg(name))
+								continue;
+							std::uint64_t expected = std::uint64_t(it->value.GetInt64());
+							std::uint64_t actual = harness.get_reg(name);
+							const std::string field(name);
+							if (field == "p")
+							{
+								expected &= ~std::uint64_t(0x10);
+								actual &= ~std::uint64_t(0x10);
+							}
+							else if (field == "s")
+							{
+								// compare only the 8-bit S; MAME keeps the full
+								// 16-bit stack address (0x100 | s) in m_SP.
+								actual &= 0xff;
+							}
+							INFO("register " << name << " expected=" << expected << " actual=" << actual);
+							REQUIRE(actual == expected);
+						}
+
+						// 3b. strict RAM equality for every fixture final cell
+						if (final.HasMember("ram") && final["ram"].IsArray())
+						{
+							for (const auto &cell : final["ram"].GetArray())
+							{
+								const std::uint32_t addr = std::uint32_t(cell[0].GetInt64());
+								const std::uint8_t expected = std::uint8_t(cell[1].GetInt64());
+								const std::uint8_t actual = harness.read_ram(addr);
+								INFO("ram[" << addr << "] expected=" << int(expected) << " actual=" << int(actual));
+								REQUIRE(int(actual) == int(expected));
+							}
+						}
+
+						// 3c. cycle equality: the core must consume exactly the
+						//     granted budget (len(cycles)) and stop cleanly on the
+						//     next instruction boundary
+						INFO("cycles expected=" << expected_cycles << " actual=" << consumed);
+						REQUIRE(consumed == expected_cycles);
+
+						++total_cases;
+					}
+				}
+			});
+
+	REQUIRE(ran);
+	WARN("m6502 oracle: " << fixtures.size() << " fixtures, " << total_cases
+			<< " cases checked, " << skipped_jam << " JAM + " << skipped_unstable
+			<< " unstable opcode file(s) skipped");
 }

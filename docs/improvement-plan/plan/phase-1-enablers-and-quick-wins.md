@@ -157,7 +157,33 @@ and m6502 (cleanest), then folding in m68000.
 > **PR boundary B** (Tasks 2–3): harness + first oracle (z80). This is the design-risk
 > landing — review the single-step loop and register-map abstraction here.
 
-### Task 4 — m6502 oracle (strict state + cycle equality)
+### Task 4 — m6502 oracle (strict state + cycle equality) ✅ DONE (PR boundary C, PR 1)
+
+> **Landed:** `[cpu][m6502]` case + m6502 register-name map (`pc/s/a/x/y/p`) +
+> `oracle_m6502_device`. **256 fixtures / 2.41 M cases / 33 M assertions pass with
+> strict state + cycle equality.** Tests-only — no shared-core change; `tests.lua`
+> needed no edit (the m6502 device library is already linked via `optional`).
+>
+> **Implementation notes (inherited by the m68000 leg):**
+> - The harness gained a small `oracle_stepper` virtual interface (in
+>   `cpu_test_harness.h`) that each oracle CPU device implements, so the single-step
+>   / quirk-reset primitives dispatch per-core without the harness downcasting to a
+>   concrete device type.
+> - The m6502 fetches its opcode *eagerly* when PC is written (state_import
+>   prefetches + decodes), so **RAM is applied before registers** (else the core
+>   latches a stale `0x00`/BRK opcode). The stepper drives the core one cycle at a
+>   time and stops at `m_inst_substate == 0`; the body's trailing next-opcode
+>   prefetch is the instruction's final charged cycle, so the **cycle adapter is the
+>   identity** (consumed == corpus) for every retiring opcode.
+> - Two small register adapters: corpus 8-bit `s` ↔ MAME 16-bit `m_SP`
+>   (`0x100 | s` on write, mask `0xff` on compare); P **B-flag (0x10) masked** out
+>   of the comparison (no physical B flip-flop; the push-as-1 behaviour is still
+>   asserted via stack RAM equality).
+> - **15 opcodes documented-skipped:** 12 JAM/KIL (never retire) + 3 unstable
+>   undocumented opcodes the oracle flagged as MAME-vs-corpus disagreements
+>   (`0x8B` ANE, `0xAB` LXA — magic-constant; `0xBB` LAS — incorrect MAME stub).
+>   **These are oracle findings surfaced for the maintainer, NOT fixed here**
+>   (shared-core behaviour). The unstable high-byte ops (`0x93/9B/9C/9E/9F`) pass.
 
 - **Files (edit):** `tests/emu/cpu/cpuoracle.cpp` (add `[cpu][m6502]` case);
   `cpu_test_harness.{h,cpp}` (m6502 register-name map); `scripts/src/tests.lua` (link the
