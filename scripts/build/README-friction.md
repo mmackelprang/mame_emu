@@ -116,7 +116,9 @@ above).
 `SUBTARGET=tiny` as a stable, upstream-friendly baseline. A PR that touches only
 driver files could instead drive a `SOURCES=`/`SOURCEFILTER` slice built from
 just the changed set, via `scripts/build/makedep.py sourcesfilter` (the
-sources-filter machinery at `makedep.py:1044-1057,1066`). That would build only
+sources-filter machinery: subparser at `makedep.py:1035`, implementation
+`write_sources_filter` at `makedep.py:1330`, dispatch at `makedep.py:1352`).
+That would build only
 the touched drivers for an even faster signal on driver-local PRs; it is noted
 here as a documented future enhancement, not wired into the YAML yet.
 
