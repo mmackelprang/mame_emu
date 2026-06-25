@@ -421,7 +421,8 @@ and m6502 (cleanest), then folding in m68000.
   and the fast pre-flight, with upstreamability notes (additive/opt-in). No code.
 - **Test/Validation:** Markdown only; `srcclean`/link check. **Green:** doc renders.
 
-> **PR boundary J** (Tasks 23–24): fast pre-flight + docs.
+> **PR boundary J** (Tasks 23–24): fast pre-flight + docs. **Status: 🚀 in-flight**
+> (`feat/ci-preflight-docs`).
 
 ---
 
