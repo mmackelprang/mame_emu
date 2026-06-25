@@ -15,7 +15,42 @@
 >   fixture) is the reusable design that the m6502/m68000 legs inherit. The oracle
 >   surfaced — and this PR fixes — two genuine z80-core WZ inaccuracies (`ed40`/`ed48`
 >   ordering; block-I/O repeat `WZ = PC+1`); `mametiny -validate` stays clean.
-> - **Remaining (later PR boundaries):** m6502 + m68000 legs (C), CI wiring of
+> - **PR boundary C (in progress)** — m6502 + m68000 legs (Tasks 4–5), shipped as two
+>   separate PRs. The harness gained a small `oracle_stepper` interface so the
+>   single-step / quirk-reset primitives dispatch per-core without the harness
+>   downcasting to a concrete device type.
+>   - **m6502 leg (Task 4) — landed.** `[cpu][m6502]` case + m6502 register-name map
+>     (`pc/s/a/x/y/p`) + `oracle_m6502_device`. All **256 fixtures / 2.41 M cases /
+>     33 M assertions pass with strict state + cycle equality** (z80 + m6502 are the
+>     strict-ratchet starters). Tests-only — **no shared-core change**.
+>     Design notes the m68000 leg and future cores inherit:
+>     - The harness gained a small `oracle_stepper` virtual interface so the
+>       single-step / quirk-reset primitives dispatch per-core (no downcast in the
+>       harness body); each oracle device implements it.
+>     - The 6502 fetches its opcode *eagerly* when PC is written (state_import
+>       prefetches + decodes), so **RAM must be applied before registers** or the
+>       core latches a stale `0x00`/BRK opcode. The single-step then drives the core
+>       one cycle at a time and stops at the `m_inst_substate == 0` boundary; the
+>       body's trailing next-opcode prefetch is the instruction's final charged
+>       cycle, so the **cycle adapter is the identity** (consumed == corpus) for
+>       every retiring opcode.
+>     - Two small per-core register adapters: the corpus 8-bit `s` is page-based
+>       into MAME's 16-bit `m_SP` (`0x100 | s` on write, mask `0xff` on compare);
+>       the P **B-flag (0x10) is masked** out of the comparison (no physical B
+>       flip-flop — MAME keeps it set, the corpus preserves the loaded value; the
+>       real push-as-1 behaviour is still asserted via stack RAM equality).
+>     - **15 opcodes are documented-skipped:** the 12 JAM/KIL opcodes (infinite
+>       read loop — never retire, no defined cycle count), plus **3 unstable
+>       undocumented opcodes the oracle flagged as MAME-vs-corpus disagreements**:
+>       `0x8B` ANE and `0xAB` LXA (magic-constant indeterminate, ~55% / ~43% of
+>       inputs disagree), and `0xBB` LAS, whose MAME `las_aby` body
+>       (`A = mem | 0x51; X = 0xff;` S untouched) is a clearly-incorrect stub vs the
+>       hardware `A = X = S = (mem & S)` (100% disagree). These are **surfaced as
+>       oracle findings for the maintainer**, not fixed in this tests-only PR
+>       (changing them is shared-core behaviour). Notably the unstable high-byte
+>       ops (SHA/SHX/SHY/TAS, `0x93/9B/9C/9E/9F`) all *pass*, so the skip list is
+>       minimal and evidence-based.
+> - **Remaining (later PR boundaries):** m68000 leg (rest of C), CI wiring of
 >   `mametests` + `srcclean` (D), oracle docs (Task 8).
 
 ## Context
