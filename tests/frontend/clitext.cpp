@@ -21,6 +21,7 @@
 #include "catch.hpp"
 
 #include "clihelp.h"
+#include "romload_messages.h"
 
 #include "util/language.h"
 #include "strformat.h"
@@ -194,4 +195,25 @@ TEST_CASE("showusage prints an Examples section", "[cli]")
 	REQUIRE(fixture.info().find("mame asteroid") != std::string::npos);
 	REQUIRE(fixture.info().find("-flop1 game.dsk") != std::string::npos);
 	REQUIRE(fixture.info().find("-listslots") != std::string::npos);
+}
+
+
+// -------------------------------------------------------------------------
+//  Task 13 - B1: actionable launch-time missing-ROM error message
+// -------------------------------------------------------------------------
+
+TEST_CASE("missing-files error names the system and points at the audit tools", "[cli]")
+{
+	// pin the locale so the English source string is produced verbatim
+	util::unload_translation();
+
+	std::string const message(
+			romload::make_missing_files_message("Asteroids (rev 4)", "asteroid", "mame"));
+
+	// structural substrings: the human description, the short name, and the
+	// next-step pointers a user can act on - not the exact prose
+	REQUIRE(message.find("Asteroids (rev 4)") != std::string::npos);
+	REQUIRE(message.find("asteroid") != std::string::npos);
+	REQUIRE(message.find("-verifyroms asteroid") != std::string::npos);
+	REQUIRE(message.find("Audit Media") != std::string::npos);
 }

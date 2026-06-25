@@ -17,6 +17,7 @@
 
 #include <atomic>
 #include <future>
+#include <mutex>
 #include <vector>
 
 
@@ -50,6 +51,7 @@ private:
 	std::atomic<std::size_t> m_audited;
 	std::atomic<ui_system_info const *> m_current;
 	std::atomic<bool> m_cancel;
+	std::mutex m_log_mutex;
 	phase m_phase;
 	bool m_fast;
 };
