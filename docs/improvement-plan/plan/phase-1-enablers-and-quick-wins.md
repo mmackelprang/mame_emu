@@ -99,7 +99,7 @@ and m6502 (cleanest), then folding in m68000.
 
 > **PR boundary A** (Task 1 standalone): the fetcher + manifest land first; no C++ yet.
 
-### Task 2 — `cpu_test_harness` skeleton: fixture machine + flat-RAM space
+### Task 2 — `cpu_test_harness` skeleton: fixture machine + flat-RAM space ✅ DONE (PR boundary B)
 
 - **Files (new):** `tests/emu/cpu/cpu_test_harness.h`, `tests/emu/cpu/cpu_test_harness.cpp`.
 - **Files (edit):** `scripts/src/tests.lua` — add the new TUs to the `files {}` block
@@ -118,7 +118,26 @@ and m6502 (cleanest), then folding in m68000.
   "[harness]"`. **Green:** the smoke case passes; the four legacy tests still pass
   (`./mametests`).
 
-### Task 3 — z80 oracle (strict state + cycle equality)
+### Task 3 — z80 oracle (strict state + cycle equality) ✅ DONE (PR boundary B)
+
+> **Landed:** harness boots a headless single-CPU `running_machine` (no-op OSD +
+> minimal `machine_manager` + inline `oracle_z80` driver over 64 KiB flat RAM),
+> single-steps one instruction by granting the fixture's T-state budget and flushing
+> to the `m_ref == 0xffff00` boundary (consumed cycles measured independently of the
+> fixture), and asserts strict equality of every register, F, fixture RAM cells, I/O
+> ports, **and** cycle count. **Result: all 1604 z80 fixtures (~1.6 M cases, ~45 M
+> assertions) pass with strict state + cycle equality.**
+>
+> **Oracle finding (z80 core fix bundled in this PR):** the oracle surfaced two genuine
+> WZ/MEMPTR inaccuracies in the modern z80 core (`src/devices/cpu/z80/z80.lst`):
+> (1) `ed40`/`ed48` (IN B,(C) / IN C,(C)) computed `WZ = BC+1` *after* overwriting
+> B/C, using the post-update (wrong) BC — reordered to use pre-update BC; (2) the
+> `inir`/`indr`/`otir`/`otdr` block-I/O repeat branches omitted the `WZ = PC+1` set
+> that the parallel `ldir`/`lddr` macros already have — added. Both are minimal
+> value-only opcode-body changes; `mametiny -validate` stays clean (exit 0) across its
+> 59 z80-using drivers. **This is the oracle working as designed** — it caught real
+> hardware inaccuracies. Because it changes shared-z80-core behaviour, it is flagged in
+> the PR for explicit review rather than treated as silent tests-only scope.
 
 - **Files (new):** `tests/emu/cpu/cpuoracle.cpp` (z80 `TEST_CASE` tagged `[cpu][z80]`).
 - **Files (edit):** `cpu_test_harness.{h,cpp}` — add the z80 register-name map;

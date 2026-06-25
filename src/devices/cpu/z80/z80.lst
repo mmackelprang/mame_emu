@@ -771,6 +771,7 @@ macro   inir
 	if (B != 0) {
 		5 * @nomreq_addr HL
 		PC -= 2;
+		WZ = PC + 1;
 		block_io_interrupted_flags();
 	}
 
@@ -790,6 +791,7 @@ macro   otir
 	if (B != 0) {
 		5 * @nomreq_addr BC
 		PC -= 2;
+		WZ = PC + 1;
 		block_io_interrupted_flags();
 	}
 
@@ -846,6 +848,7 @@ macro   indr
 	if (B != 0) {
 		5 * @nomreq_addr HL
 		PC -= 2;
+		WZ = PC + 1;
 		block_io_interrupted_flags();
 	}
 
@@ -865,6 +868,7 @@ macro   otdr
 	if (B != 0) {
 		5 * @nomreq_addr BC
 		PC -= 2;
+		WZ = PC + 1;
 		block_io_interrupted_flags();
 	}
 
@@ -5518,8 +5522,10 @@ ed40	# IN   B,(C)
 		m_f.yx_val = TDAT8;
 		m_f.h_val = m_f.n = 0;
 	}
-	B = TDAT8;
+	// WZ = BC + 1 must use the pre-update BC: this opcode writes the result to
+	// B, so computing WZ after B = TDAT8 would use the new (wrong) BC.
 	WZ = BC + 1;
+	B = TDAT8;
 
 ed41	# OUT  (C),B
 	TDAT8 = B;
@@ -5556,8 +5562,10 @@ ed48	# IN   C,(C)
 		m_f.yx_val = TDAT8;
 		m_f.h_val = m_f.n = 0;
 	}
-	C = TDAT8;
+	// WZ = BC + 1 must use the pre-update BC: this opcode writes the result to
+	// C, so computing WZ after C = TDAT8 would use the new (wrong) BC.
 	WZ = BC + 1;
+	C = TDAT8;
 
 ed49	# OUT  (C),C
 	TDAT8 = C;
