@@ -71,7 +71,7 @@ the per-phase task plans (`plan/phase-{1,2,3}-*.md`) from these ADRs.
 |---|---|---|---|
 | 0001 | Proposed | 5 | Catch2 harness in `mametests`; SingleStepTests corpus fetched (not vendored) via pinned/hashed manifest; gates `mametests` + `srcclean` in CI. |
 | 0002 | Proposed | 5 | Targets the **new microcode core** (`m68000.cpp`), not legacy Musashi. Increment 1 = plain 68000 common path; rest `cfunc_` to interpreter. Oracle-gated. |
-| 0003 | Proposed | 4 | Pure UX; surfaces already-present data. All copy via the `_()` i18n macro → touches the translation catalog. Golden-output CLI tests. |
+| 0003 | In progress | 4 | Pure UX; surfaces already-present data. All copy via the `_()` i18n macro → touches the translation catalog. Golden-output CLI tests. **Group A (CLI discoverability, T10–T12 / PR boundary E) shipped** — `clihelp.{cpp,h}` + golden `[cli]` tests; Groups B (T13–T14) & C (T15–T18) pending. |
 | 0004 | Proposed | 5 | HTTP server is **already frontend-owned** (`machine_manager`) and created before any machine — launcher endpoints just need frontend-scoped registration. Read-only first; localhost-default + traversal hardening required. |
 | 0005 | Proposed | 5 | Tooling-only. Staleness detection / auto-REGENIE; `reconcilelist --fix` autofix; fast CI pre-flight. Unit-tested. |
 

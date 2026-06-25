@@ -14,6 +14,7 @@
 #include "ui/moptions.h"
 
 #include "audit.h"
+#include "clihelp.h"
 #include "infoxml.h"
 #include "language.h"
 #include "luaengine.h"
@@ -236,6 +237,23 @@ void cli_frontend::start_execution(mame_machine_manager *manager, const std::vec
 		// if we failed, check for no command and a system name first; in that case error on the name
 		if (m_options.command().empty() && mame_options::system(m_options) == nullptr && !m_options.attempted_system_name().empty())
 			throw emu_fatalerror(EMU_ERR_NO_SUCH_SYSTEM, "Unknown system '%s'", m_options.attempted_system_name());
+
+		// if this was an unknown option, offer approximate matches the same way we do for system names
+		std::string const unknown(cli_help::extract_unknown_option_name(ex.message()));
+		if (!unknown.empty())
+		{
+			// gather the names of every known option (including aliases)
+			std::vector<std::string> known;
+			for (auto const &entry : m_options.entries())
+			{
+				if (entry->type() == core_options::option_type::HEADER)
+					continue;
+				for (std::string const &name : entry->names())
+					if (!name.empty())
+						known.push_back(name);
+			}
+			cli_help::print_option_suggestions(cli_help::suggest_option_matches(unknown, known));
+		}
 
 		// otherwise, error on the options
 		throw emu_fatalerror(EMU_ERR_INVALID_CONFIG, "%s", ex.message());
@@ -898,6 +916,9 @@ void cli_frontend::listslots(const std::vector<std::string> &args)
 		if (first)
 			osd_printf_info("%-16s (none)\n", drivlist.driver().name);
 	}
+
+	// show the user how to actually select a slot option from the command line
+	cli_help::print_listslots_usage_hint();
 }
 
 
@@ -954,6 +975,9 @@ void cli_frontend::listmedia(const std::vector<std::string> &args)
 		if (first)
 			osd_printf_info("%-16s (none)\n", drivlist.driver().name);
 	}
+
+	// show the user how to actually mount media from the command line
+	cli_help::print_listmedia_usage_hint();
 }
 
 //-------------------------------------------------
@@ -1735,6 +1759,7 @@ void cli_frontend::execute_commands(std::string_view exename)
 	{
 		osd_printf_info("Usage:  %s [machine] [media] [software] [options]",exename);
 		osd_printf_info("\n\nOptions:\n%s", m_options.output_help());
+		cli_help::print_usage_examples(exename);
 		return;
 	}
 

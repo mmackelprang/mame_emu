@@ -58,6 +58,8 @@ files {
 	MAME_DIR .. "src/frontend/mame/cheat.h",
 	MAME_DIR .. "src/frontend/mame/clifront.cpp",
 	MAME_DIR .. "src/frontend/mame/clifront.h",
+	MAME_DIR .. "src/frontend/mame/clihelp.cpp",
+	MAME_DIR .. "src/frontend/mame/clihelp.h",
 	MAME_DIR .. "src/frontend/mame/infoxml.cpp",
 	MAME_DIR .. "src/frontend/mame/infoxml.h",
 	MAME_DIR .. "src/frontend/mame/iptseqpoll.cpp",
