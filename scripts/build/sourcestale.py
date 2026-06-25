@@ -198,7 +198,7 @@ def baked_source_set(projectdir, target):
             for match in _OBJ_RE.findall(text):
                 objpath = _norm(match)
                 if is_globbed_source(objpath, prefix):
-                    result.add(objpath[:-2] + '.cpp')
+                    result.add(os.path.splitext(objpath)[0] + '.cpp')
     if not found_any_makefile:
         return None
     return result

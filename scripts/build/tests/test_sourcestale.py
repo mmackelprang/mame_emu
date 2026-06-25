@@ -141,6 +141,21 @@ def test_baked_source_set_round_trips_through_generated_make(tmp_path):
     }
 
 
+def test_baked_set_maps_obj_suffix_back_to_cpp(tmp_path):
+    # Some generated project files emit objects with a `.obj` extension rather
+    # than `.o` (matched by _OBJ_RE).  The reverse mapping must be
+    # extension-agnostic: `src/mame/atari/asteroid.obj` -> `.../asteroid.cpp`,
+    # not the truncated `.../asteroid.ob.cpp`.
+    root = str(tmp_path)
+    projectdir = os.path.join(root, 'build', 'projects', 'gmake')
+    os.makedirs(projectdir)
+    with open(os.path.join(projectdir, 'mame_mame.make'), 'w', encoding='utf-8') as f:
+        f.write('\t$(OBJDIR)/src/mame/atari/asteroid.obj \\\n')
+    baked = sourcestale.baked_source_set(
+        os.path.join(root, 'build', 'projects'), 'mame')
+    assert baked == {'src/mame/atari/asteroid.cpp'}
+
+
 def test_baked_set_excludes_top_level_hand_listed_sources(tmp_path):
     # src/mame/mame.cpp is listed directly under src/mame (the entry point); it
     # is added explicitly by the build scripts, NOT by the directory glob, so it

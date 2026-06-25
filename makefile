@@ -1594,8 +1594,11 @@ endif
 #   make check-sources FAIL_ON_STALE=1  # CI fail mode: non-zero exit on staleness
 # AUTO_REGENIE only regenerates when the detector reports staleness (the
 # detector exits non-zero in --fail-on-stale mode, gating the `|| $(MAKE)
-# REGENIE=1`).  This target is purely additive: it is never pulled into the
-# default `all`/`generate` build path and does nothing unless invoked.
+# REGENIE=1`).  Note the fallback `$(MAKE) ... REGENIE=1` invokes make with no
+# explicit goal, so it runs the default `all` target: it triggers a full
+# rebuild (regenerating project files *and* recompiling), not project-file
+# regeneration alone.  This target is purely additive: it is never pulled into
+# the default `all`/`generate` build path and does nothing unless invoked.
 
 .PHONY: check-sources
 
