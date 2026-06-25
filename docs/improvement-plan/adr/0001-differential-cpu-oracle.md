@@ -1,9 +1,22 @@
 # ADR 0001 — Differential CPU execution oracle (+ CI test gating)
 
-> **Status:** Proposed · **Phase:** P1 (enabler) · **Owner:** TBD
+> **Status:** In progress (z80 leg landed) · **Phase:** P1 (enabler) · **Owner:** TBD
 > **Depends on:** none · **Depended on by:** [0002 (m68000 DRC)](0002-m68000-drcuml-port.md)
 > **Spec:** [`docs/improvement-plan/specs/2026-06-24-mame-improvements-design.md`](../specs/2026-06-24-mame-improvements-design.md)
 > **Date:** 2026-06-24
+
+> **Implementation progress**
+> - **PR #1** — fixture fetcher + pinned hashed manifest (Task 1 / PR boundary A). Merged.
+> - **PR boundary B** — Catch2 harness (`tests/emu/cpu/cpu_test_harness.{h,cpp}`) + the
+>   **z80 leg** (`tests/emu/cpu/cpuoracle.cpp`), wired into `mametests` via
+>   `scripts/src/tests.lua` (Tasks 2–3). All 1604 z80 fixtures pass with **strict state +
+>   cycle equality**. The single-step loop (grant the fixture's T-state budget, flush to
+>   the `m_ref == 0xffff00` boundary, measure consumed cycles independently of the
+>   fixture) is the reusable design that the m6502/m68000 legs inherit. The oracle
+>   surfaced — and this PR fixes — two genuine z80-core WZ inaccuracies (`ed40`/`ed48`
+>   ordering; block-I/O repeat `WZ = PC+1`); `mametiny -validate` stays clean.
+> - **Remaining (later PR boundaries):** m6502 + m68000 legs (C), CI wiring of
+>   `mametests` + `srcclean` (D), oracle docs (Task 8).
 
 ## Context
 
