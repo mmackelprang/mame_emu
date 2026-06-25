@@ -1,6 +1,6 @@
 # ADR 0003 — Front-end usability quick wins
 
-> **Status:** In progress — Groups A + B shipped; Group C pending · **Phase:** P1 · **Owner:** TBD
+> **Status:** Done — Groups A, B, C all shipped (PRs #3, #4, #5) · **Phase:** P1 · **Owner:** TBD
 > **Depends on:** none · **Related:** [0004 (web control surface)](0004-web-control-surface.md) reuses the same data feeds
 > **Spec:** [`docs/improvement-plan/specs/2026-06-24-mame-improvements-design.md`](../specs/2026-06-24-mame-improvements-design.md)
 > **Date:** 2026-06-24
