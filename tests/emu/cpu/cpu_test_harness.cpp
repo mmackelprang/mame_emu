@@ -50,6 +50,7 @@
 
 #include "cpu/z80/z80.h"
 #include "cpu/m6502/m6502.h"
+#include "cpu/m68000/m68000.h"
 
 #include "emuopts.h"
 #include "ioport.h"
@@ -318,6 +319,140 @@ oracle_m6502_device::oracle_m6502_device(const machine_config &mconfig, const ch
 
 
 //**************************************************************************
+//  M68000 ORACLE DEVICE  (the new microcode core, NOT Musashi)
+//**************************************************************************
+//
+//  The modern m68000 core (src/devices/cpu/m68000/m68000.cpp) is a microcode
+//  state machine.  execute_run() loops while m_icount > 0, advancing the
+//  microcode one bus phase at a time; m_inst_state holds the current microcode
+//  state and m_inst_substate the sub-phase within it.  An *architectural*
+//  instruction boundary is the point where the core is about to fetch the next
+//  opcode: m_inst_state >= S_first_instruction with m_inst_substate == 0 (this
+//  is exactly where the core's own debugger_instruction_hook fires, line ~165
+//  of m68000.cpp).
+//
+//  Writing PC through the state interface re-parks the core on such a boundary:
+//  state_import(STATE_GENPC) recomputes m_ipc/m_pc, re-reads the prefetch queue
+//  (m_ir/m_irc) from the program space, and sets m_inst_state =
+//  m_decode_table[m_ird], m_inst_substate = 0.  So, like the m6502, the opcode
+//  is fetched eagerly when PC is written and RAM must be applied first.
+//
+//  --- Cycle adapter (the artifact Phase 2 / ADR 0002 consumes) ---
+//  The microcode core does not decrement m_icount once per architectural cycle
+//  uniformly; instead each handler charges a bus phase's cost, and execute_run()
+//  carries any over-run across calls in m_count_before_instruction_step (it
+//  subtracts that from m_icount at entry).  To measure one instruction's true
+//  cycle cost independently of the corpus we therefore: reset
+//  m_count_before_instruction_step to 0, then grant ONE cycle at a time and sum
+//  the icount actually consumed (granted - remaining, where remaining can go
+//  negative -- a handler that costs more than the single granted cycle drives
+//  m_icount below zero, and that overshoot is folded back in).  We stop the
+//  instant the core returns to a fresh architectural boundary having run at
+//  least one phase of our instruction.  The resulting sum is the SingleStepTests
+//  `length` (corpus bus-cycle count) -- this identity IS the documented adapter;
+//  no fudge factor is applied.
+
+class oracle_m68000_device : public m68000_device, public cpuoracle::oracle_stepper
+{
+public:
+	oracle_m68000_device(const machine_config &mconfig, const char *tag, device_t *owner, u32 clock);
+
+	// Run exactly one architectural instruction and return the cycles it
+	// consumed (the corpus `length`).  The CPU must be parked on an instruction
+	// boundary on entry (true after writing PC through the state interface).
+	//
+	// Boundary detection: the microcode core latches the instruction's address
+	// in m_ipc at each instruction start (m68000.cpp line ~162,
+	// `m_ipc = m_pc - 2`, run when m_inst_state >= S_first_instruction).  All of
+	// a single instruction's microcode states are >= S_first_instruction, so
+	// that condition is NOT a per-instruction marker -- but m_ipc only changes
+	// when the *next* instruction is decoded.  We therefore record the entry
+	// m_ipc and stop the cycle after it changes: that is exactly the retirement
+	// of our instruction (its final prefetch loaded the next opcode and advanced
+	// m_ipc).  Granting one cycle at a time and summing the consumed icount then
+	// yields the instruction's true bus-cycle cost == the corpus `length`.
+	int step_instruction(int budget)
+	{
+		(void)budget;
+
+		// The over-run carry must start clean so the first grant is not
+		// silently swallowed by a stale m_count_before_instruction_step from a
+		// previous case (we also clear it in clear_quirk_state(), belt and
+		// braces).
+		m_count_before_instruction_step = 0;
+
+		const u32 entry_ipc = m_ipc;
+		int consumed = 0;
+
+		// Phase 1 -- run our instruction.  Grant one cycle at a time; the first
+		// grant moves the core off the entry boundary (into m_inst_substate != 0
+		// or a non-first microcode state), and we keep going until the core is
+		// back on a fresh boundary -- that transition is the retirement of our
+		// instruction (the next opcode fetch is pending but has not run).  A
+		// generous guard (the slowest 68000 instruction, a 64-bit-ish MOVEM or
+		// integer divide, is well under 200 cycles) prevents a runaway.
+		for (int guard = 0; guard < 512; ++guard)
+		{
+			*m_icountptr = 1;
+			run();
+			// If this step advanced m_ipc, the core has begun the *next*
+			// instruction (execute_run() sets m_ipc = m_pc - 2 at each
+			// instruction start), so any cycles it charged belong to that next
+			// instruction, NOT ours -- break WITHOUT accumulating them.
+			if (m_ipc != entry_ipc)
+				break;   // our instruction retired; the next opcode is decoded
+			consumed += 1 - *m_icountptr;
+		}
+
+		return consumed;
+	}
+
+	// Reset cross-instruction microcode/IRQ state a fixture does not carry, so
+	// each case starts on a clean architectural boundary.  Writing PC re-parks
+	// m_inst_state/substate, but the deferred post-instruction state is NOT
+	// touched by state_import, so clear it here.
+	//
+	// The load-bearing reset is m_next_state: at the end of an instruction the
+	// microcode latches the *next* dispatch there -- in particular it sets it to
+	// S_TRACE when the trace bit (SR_T) is set (m68000gen.py "next_trace").  Our
+	// single-step stops at instruction retirement, before that deferred trace
+	// exception runs, so a fixture with SR.T set leaves m_next_state == S_TRACE
+	// behind.  Without clearing it the *following* case would spuriously take a
+	// trace exception (observed as a stray supervisor entry: wrong PC=vector,
+	// SR.S set, SSP pushed).  The corpus, by construction, captures the
+	// architectural state immediately after the instruction and never runs the
+	// deferred trace/interrupt, so clearing these here matches the corpus model.
+	void clear_quirk_state()
+	{
+		m_count_before_instruction_step = 0;
+		m_post_run = 0;
+		m_post_run_cycles = 0;
+		m_inst_substate = 0;
+		m_next_state = 0;
+		m_t = 0;
+		m_isr = 0;          // mid-instruction ALU/flag scratch, not state-interface visible
+		m_new_sr = 0;
+		m_nmi_pending = 0;
+		m_virq_state = 0;
+		m_int_level = 0;
+		m_int_next_state = 0;
+	}
+
+	// oracle_stepper
+	virtual int oracle_step(int budget) override { return step_instruction(budget); }
+	virtual void oracle_prepare_case() override { clear_quirk_state(); }
+};
+
+DECLARE_DEVICE_TYPE(ORACLE_M68000, oracle_m68000_device)
+DEFINE_DEVICE_TYPE(ORACLE_M68000, oracle_m68000_device, "oracle_m68000", "CPU Oracle M68000")
+
+oracle_m68000_device::oracle_m68000_device(const machine_config &mconfig, const char *tag, device_t *owner, u32 clock) :
+	m68000_device(mconfig, ORACLE_M68000, tag, owner, clock)
+{
+}
+
+
+//**************************************************************************
 //  ORACLE DRIVER
 //**************************************************************************
 
@@ -428,6 +563,57 @@ void oracle_m6502_state::m6502_machine(machine_config &config)
 }
 
 void oracle_m6502_state::machine_reset()
+{
+	if (g_reset_hook)
+		g_reset_hook(machine(), *m_cpu);
+	machine().schedule_exit();
+}
+
+
+//**************************************************************************
+//  M68000 ORACLE DRIVER
+//**************************************************************************
+
+class oracle_m68000_state : public driver_device
+{
+public:
+	oracle_m68000_state(const machine_config &mconfig, device_type type, const char *tag) :
+		driver_device(mconfig, type, tag),
+		m_cpu(*this, "maincpu")
+	{
+	}
+
+	void m68000_machine(machine_config &config) ATTR_COLD;
+
+	// keep the search path empty so we never touch the filesystem
+	virtual std::vector<std::string> searchpath() const override { return std::vector<std::string>(); }
+
+protected:
+	virtual void machine_reset() override ATTR_COLD;
+
+private:
+	void m68000_map(address_map &map) ATTR_COLD;
+
+	required_device<oracle_m68000_device> m_cpu;
+};
+
+
+void oracle_m68000_state::m68000_map(address_map &map)
+{
+	// Flat RAM over the whole 24-bit (16 MiB) 68000 address space.  The corpus
+	// model is flat memory with 16-bit big-endian word accesses; a single
+	// AS_PROGRAM RAM map serves opcode fetches (AS_OPCODES falls back to
+	// AS_PROGRAM) and data accesses alike.
+	map(0x000000, 0xffffff).ram();
+}
+
+void oracle_m68000_state::m68000_machine(machine_config &config)
+{
+	ORACLE_M68000(config, m_cpu, 8_MHz_XTAL);
+	m_cpu->set_addrmap(AS_PROGRAM, &oracle_m68000_state::m68000_map);
+}
+
+void oracle_m68000_state::machine_reset()
 {
 	if (g_reset_hook)
 		g_reset_hook(machine(), *m_cpu);
@@ -553,6 +739,12 @@ INPUT_PORTS_END
 ROM_START( oraclem6502 )
 ROM_END
 
+static INPUT_PORTS_START( oraclem68000 )
+INPUT_PORTS_END
+
+ROM_START( oraclem68000 )
+ROM_END
+
 
 //**************************************************************************
 //  GAME DRIVER REGISTRATION (global scope)
@@ -560,6 +752,7 @@ ROM_END
 
 GAME( 2026, oraclez80, 0, z80_machine, oraclez80, oracle_z80_state, empty_init, ROT0, "MAME", "CPU Oracle z80 fixture", MACHINE_NO_SOUND | MACHINE_IS_BIOS_ROOT )
 GAME( 2026, oraclem6502, 0, m6502_machine, oraclem6502, oracle_m6502_state, empty_init, ROT0, "MAME", "CPU Oracle m6502 fixture", MACHINE_NO_SOUND | MACHINE_IS_BIOS_ROOT )
+GAME( 2026, oraclem68000, 0, m68000_machine, oraclem68000, oracle_m68000_state, empty_init, ROT0, "MAME", "CPU Oracle m68000 fixture", MACHINE_NO_SOUND | MACHINE_IS_BIOS_ROOT )
 
 
 namespace cpuoracle {
@@ -637,6 +830,58 @@ const cpu_core_descriptor &m6502_core_descriptor()
 		"m6502",
 		&GAME_NAME(oraclem6502),
 		s_m6502_regmap
+	};
+	return desc;
+}
+
+
+//**************************************************************************
+//  M68000 CORE DESCRIPTOR
+//**************************************************************************
+
+// Fixture field -> m68000 state index.  The SingleStepTests m68000 corpus names
+// the 8 data + 7 address registers, the user and supervisor stack pointers
+// separately (usp/ssp), the status register, and PC.  MAME stores a7 as two
+// banked slots -- m_da[15] = USP (M68K_USP) and m_da[16] = SSP (exposed as
+// M68K_SP) -- both mapped here directly, so their read-back is bank-independent.
+// The test applies SR before PC mainly so the supervisor bit is settled when the
+// PC write re-parks the core.  (Note: state_import(M68K_SR) does NOT itself call
+// update_user_super(), so it does not switch m_program/m_opcodes; that is benign
+// only because the oracle driver maps a single flat RAM, where the supervisor and
+// user program spaces resolve to the same memory.)  The corpus `prefetch` queue is
+// not a state-interface register; it is reconstructed when PC is written (the
+// flat RAM holds the opcode words) and is not asserted directly.
+static const reg_map_entry s_m68000_regmap[] =
+{
+	{ "d0",  M68K_D0  },
+	{ "d1",  M68K_D1  },
+	{ "d2",  M68K_D2  },
+	{ "d3",  M68K_D3  },
+	{ "d4",  M68K_D4  },
+	{ "d5",  M68K_D5  },
+	{ "d6",  M68K_D6  },
+	{ "d7",  M68K_D7  },
+	{ "a0",  M68K_A0  },
+	{ "a1",  M68K_A1  },
+	{ "a2",  M68K_A2  },
+	{ "a3",  M68K_A3  },
+	{ "a4",  M68K_A4  },
+	{ "a5",  M68K_A5  },
+	{ "a6",  M68K_A6  },
+	{ "usp", M68K_USP },
+	{ "ssp", M68K_SP  },
+	{ "sr",  M68K_SR  },
+	{ "pc",  M68K_PC  },
+	{ nullptr, 0 }
+};
+
+const cpu_core_descriptor &m68000_core_descriptor()
+{
+	static const cpu_core_descriptor desc =
+	{
+		"m68000",
+		&GAME_NAME(oraclem68000),
+		s_m68000_regmap
 	};
 	return desc;
 }
@@ -785,15 +1030,17 @@ void cpu_test_harness::set_quirk_q(uint8_t q)
 GAME_EXTERN(___empty);
 
 // Must be sorted by short name (driver_list uses binary search): '_' (0x5f)
-// sorts before lowercase letters, and "oraclem6502" < "oraclez80".
+// sorts before lowercase letters, and
+// "oraclem6502" < "oraclem68000" < "oraclez80".
 const game_driver * const driver_list::s_drivers_sorted[] =
 {
 	&GAME_NAME(___empty),
 	&GAME_NAME(oraclem6502),
+	&GAME_NAME(oraclem68000),
 	&GAME_NAME(oraclez80),
 };
 
-std::size_t const driver_list::s_driver_count = 3;
+std::size_t const driver_list::s_driver_count = 4;
 
 // emulator_info stubs -- none of these is exercised by the oracle path, but
 // the symbols must resolve to link the emu library without the frontend.
