@@ -395,7 +395,8 @@ and m6502 (cleanest), then folding in m68000.
   **Green:** exact-match assertions pass; re-check reports clean.
 
 > **PR boundary I** (Tasks 21–22): reconciler autofix + its golden tests (ship together —
-> the golden test is the safety net for the file-churn risk).
+> the golden test is the safety net for the file-churn risk). **Status: 🚀 in-flight**
+> (`feat/reconcile-fix`).
 
 ### Task 23 — Fast CI pre-flight job
 
