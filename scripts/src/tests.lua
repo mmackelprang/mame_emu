@@ -42,6 +42,7 @@ project("mametests")
 		"utils",
 		ext_lib("expat"),
 		ext_lib("zlib"),
+		ext_lib("utf8proc"),
 		"ocore_" .. _OPTIONS["osd"],
 	}
 
@@ -49,16 +50,11 @@ project("mametests")
 		MAME_DIR .. "3rdparty/catch/single_include",
 		MAME_DIR .. "src/osd",
 		MAME_DIR .. "src/emu",
+		MAME_DIR .. "src/lib",
 		MAME_DIR .. "src/lib/util",
+		MAME_DIR .. "src/frontend/mame",
 		ext_includedir("expat"),
 		ext_includedir("zlib"),
-	}
-
-	files {
-		MAME_DIR .. "src/emu/video/rgbsse.cpp",
-		MAME_DIR .. "src/emu/video/rgbsse.h",
-		MAME_DIR .. "src/emu/video/rgbvmx.cpp",
-		MAME_DIR .. "src/emu/video/rgbvmx.h",
 	}
 
 	files {
@@ -67,5 +63,9 @@ project("mametests")
 		MAME_DIR .. "tests/lib/util/options.cpp",
 		MAME_DIR .. "tests/emu/attotime.cpp",
 		MAME_DIR .. "tests/emu/video/rgbutil.cpp",
+		MAME_DIR .. "tests/frontend/clitext.cpp",
+		-- CLI discoverability helpers under test (no emulation-core deps)
+		MAME_DIR .. "src/frontend/mame/clihelp.cpp",
+		MAME_DIR .. "src/frontend/mame/clihelp.h",
 	}
 
