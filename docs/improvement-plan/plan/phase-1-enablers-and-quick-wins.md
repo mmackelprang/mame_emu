@@ -395,7 +395,9 @@ and m6502 (cleanest), then folding in m68000.
   **Green:** exact-match assertions pass; re-check reports clean.
 
 > **PR boundary I** (Tasks 21–22): reconciler autofix + its golden tests (ship together —
-> the golden test is the safety net for the file-churn risk).
+> the golden test is the safety net for the file-churn risk). **Status: ✅ Done** —
+> `reconcilelist --fix` landed in `scripts/build/makedep.py` with 11 byte-exact golden
+> tests (`scripts/build/tests/test_reconcile_fix.py`); CI still runs check mode only.
 
 ### Task 23 — Fast CI pre-flight job
 

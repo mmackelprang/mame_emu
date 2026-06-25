@@ -7,6 +7,7 @@ import argparse
 import glob
 import io
 import os.path
+import re
 import sys
 import xml.sax
 
@@ -705,6 +706,85 @@ class DriverReconciler(DriverFilter):
         self.drivers = { }
         self.parse_list(options.list, sourcefile, driver)
 
+    class CollectHandler:
+        # SAX handler used in --fix mode.  Unlike InfoHandler (which only
+        # reports mismatches), this COLLECTS the authoritative source->drivers
+        # mapping from -listxml.  It records:
+        #   * order:   list of source files in first-seen (document) order
+        #   * drivers: dict source -> list of drivers in document order
+        # so the fixer can reproduce registration order for new groups/drivers.
+        def __init__(self, **kwargs):
+            super().__init__(**kwargs)
+            self.order = [ ]            # source files, document order, no dups
+            self.drivers = { }          # source -> [drivers in document order]
+            self.locator = None
+            self.ignored_depth = 0
+            self.in_document = False
+            self.in_mame = False
+
+        def startElement(self, name, attrs):
+            if not self.in_document:
+                raise xml.sax.SAXParseException('Unexpected start of element "%s"' % (name, ), None, self.locator)
+            elif self.ignored_depth > 0:
+                self.ignored_depth += 1
+            elif not self.in_mame:
+                if name != 'mame':
+                    raise xml.sax.SAXParseException('Unexpected start of element "%s"' % (name, ), None, self.locator)
+                self.in_mame = True
+            elif name != 'machine':
+                raise xml.sax.SAXParseException('Unexpected start of element "%s"' % (name, ), None, self.locator)
+            else:
+                # Match InfoHandler's runnable filter exactly: only runnable
+                # machines count as drivers for the list.
+                runnable = attrs.get('runnable', 'yes')
+                if runnable == 'yes':
+                    shortname = attrs['name']
+                    source = attrs['sourcefile'].replace('\\', '/')
+                    if source not in self.drivers:
+                        self.drivers[source] = [ ]
+                        self.order.append(source)
+                    self.drivers[source].append(shortname)
+                self.ignored_depth = 1
+
+        def endElement(self, name):
+            if self.ignored_depth > 0:
+                self.ignored_depth -= 1
+            elif self.in_mame:
+                if name != 'mame':
+                    raise xml.sax.SAXParseException('Unexpected end of element "%s"' % (name, ), None, self.locator)
+                self.in_mame = False
+            else:
+                raise xml.sax.SAXParseException('Unexpected end of element "%s"' % (name, ), None, self.locator)
+
+        def startDocument(self):
+            if self.in_document:
+                raise xml.sax.SAXParseException('Unexpected start of document', None, self.locator)
+            self.in_document = True
+
+        def endDocument(self):
+            if not self.in_document:
+                raise xml.sax.SAXParseException('Unexpected end of document', None, self.locator)
+            self.in_document = False
+
+        def setDocumentLocator(self, locator):
+            self.locator = locator
+
+        def startPrefixMapping(self, prefix, uri):
+            pass
+
+        def endPrefixMapping(self, prefix):
+            pass
+
+        def characters(self, content):
+            pass
+
+        def ignorableWhitespace(self, whitespace):
+            pass
+
+        def processingInstruction(self, target, data):
+            pass
+
+
     def reconcile_xml(self, xmlfile):
         handler = self.InfoHandler(self.drivers)
         try:
@@ -714,6 +794,211 @@ class DriverReconciler(DriverFilter):
         except xml.sax.SAXException as err:
             sys.stderr.write('Error parsing system information file: %s\n' % (err, ))
             self.bad = True
+
+    @classmethod
+    def collect_xml(cls, xmlfile):
+        # Parse -listxml in fix mode, returning the CollectHandler with the
+        # authoritative (ordered) source->drivers mapping.  This does not touch
+        # any instance state, so it works without parsing the (possibly stale)
+        # list file -- the whole point of --fix is to repair that file.
+        handler = cls.CollectHandler()
+        try:
+            xml.sax.parse(xmlfile, handler=handler)
+        except xml.sax.SAXException as err:
+            sys.stderr.write('Error parsing system information file: %s\n' % (err, ))
+            sys.exit(1)
+        return handler
+
+
+def natural_sort_key(text):
+    # Natural/numeric-aware sort key: split a string into runs of digits and
+    # non-digits so that numeric runs compare as integers.  This makes
+    # 'akai/mpc60.cpp' sort before 'akai/mpc2000.cpp' (60 < 2000) while plain
+    # lexicographic order would (wrongly) put '2000' before '60'.
+    parts = re.split(r'(\d+)', text)
+    key = [ ]
+    for i, part in enumerate(parts):
+        if i % 2:
+            # Odd indices are the captured digit runs -> compare as integers.
+            # Pair with '' so a (int, str) tuple never compares against a
+            # bare str part (Python 3 can't order int vs str directly).
+            key.append((1, int(part), ''))
+        else:
+            key.append((0, 0, part))
+    return key
+
+
+def fix_driver_list(listpath, collected):
+    # Rewrite `listpath` in place so it matches the authoritative source->driver
+    # mapping in `collected` (a DriverReconciler.CollectHandler), with minimal
+    # churn:
+    #   * the verbatim header block (everything before the first @source:) is
+    #     preserved byte-for-byte, including its line endings;
+    #   * existing @source: groups keep their order, and existing drivers keep
+    #     their order within a group;
+    #   * stale drivers (not produced by the binary for that source) are dropped;
+    #   * a group that ends up empty is removed entirely;
+    #   * missing drivers are appended to their existing group (in binary
+    #     registration order), or a brand-new group is inserted at the
+    #     natural-sorted position among the @source: headers, with its drivers
+    #     in binary registration order.
+    # Returns (newtext, summary) where summary is a dict of change counts.
+    with io.open(listpath, 'r', encoding='utf-8', newline='') as f:
+        raw = f.read()
+
+    # Detect the dominant line-ending style so we reproduce it exactly.  The
+    # real lists are CRLF; default to that when no newline is present at all.
+    newline = '\r\n' if ('\r\n' in raw or '\r' not in raw and '\n' not in raw) else '\n'
+
+    # Split into physical lines while remembering whether the file ended with a
+    # trailing newline (the real lists do).  We rejoin with `newline` later.
+    lines = raw.split('\n')
+    trailing_newline = False
+    if lines and lines[-1] == '':
+        # The text ended with a newline -> drop the empty trailing element.
+        trailing_newline = True
+        lines = lines[:-1]
+    # Strip a stray '\r' left on each line by the '\n' split (CRLF files).
+    lines = [l[:-1] if l.endswith('\r') else l for l in lines]
+
+    # Locate the first @source: line; everything before it is the header block.
+    first_source = None
+    for i, line in enumerate(lines):
+        if line.strip().startswith('@'):
+            first_source = i
+            break
+
+    if first_source is None:
+        # No groups at all -> nothing structured to reconcile; leave header,
+        # then emit every collected source as a fresh group.
+        header_lines = lines
+        body_lines = [ ]
+    else:
+        header_lines = lines[:first_source]
+        body_lines = lines[first_source:]
+
+    # Parse the body into ordered group blocks.  A '#'-prefixed line is a
+    # load-bearing #include directive --fix can't handle, so it's a hard error;
+    # a line whose stripped form starts with '@source:' opens a group;
+    # subsequent non-blank, non-'@' lines are its drivers; blank lines are
+    # separators.
+    groups = [ ]            # list of [source, [drivers]]
+    current = None
+    for line in body_lines:
+        stripped = line.strip()
+        if stripped.startswith('#'):
+            # #-prefixed lines are load-bearing #include directives, not
+            # comments.  --fix can't safely rewrite recursive/multi-file lists,
+            # so fail loudly rather than silently dropping the directive.
+            sys.stderr.write('reconcilelist --fix does not support list files with #include directives (found "%s"); fix the referenced file directly\n' % (stripped, ))
+            sys.exit(1)
+        elif stripped.startswith('@'):
+            # Open a new @source: group (parse the source path after the colon).
+            parts = stripped[1:].lstrip().split(':', 1)
+            source = parts[1].strip() if len(parts) == 2 else ''
+            current = [source, [ ]]
+            groups.append(current)
+        elif stripped and current is not None:
+            current[1].append(stripped)
+        # blank lines / stray content are dropped from the structured model;
+        # we re-emit canonical blank-line separators below.
+
+    authoritative = collected.drivers     # source -> [drivers in doc order]
+    summary = { 'added': 0, 'removed': 0, 'moved': 0,
+                'groups_added': 0, 'groups_removed': 0 }
+
+    # Build the set of (source, driver) the binary expects, and a quick lookup
+    # of which source the binary assigns each driver to (for move detection).
+    driver_source = { }
+    for source, drivers in authoritative.items():
+        for d in drivers:
+            driver_source[d] = source
+
+    # The set of drivers anywhere in the existing list -- used to distinguish a
+    # genuinely-new driver from one that merely moved between sources.
+    listed_drivers = set()
+    for source, drivers in groups:
+        listed_drivers.update(drivers)
+
+    # --- Reconcile existing groups in their existing order -------------------
+    # Track, per existing source, which drivers we've kept (so we can compute
+    # the remaining-to-append set afterwards while preserving binary order).
+    kept = { }              # source -> set(drivers kept in that group)
+    new_groups = [ ]        # rebuilt [source, [drivers]] in final order
+    for source, drivers in groups:
+        wanted_set = set(authoritative.get(source, [ ]))
+        keep = [ ]
+        for d in drivers:
+            if d in wanted_set:
+                keep.append(d)          # binary still has this driver here
+            elif d in driver_source:
+                # Wrong source here but exists elsewhere -> a move (we drop it
+                # from this group now; the destination group adds it below).
+                summary['moved'] += 1
+            else:
+                # Gone from the binary entirely -> stale removal.
+                summary['removed'] += 1
+        kept[source] = set(keep)
+        new_groups.append([source, keep])
+
+    # Append drivers the binary has for an existing source but the list lacked,
+    # in binary registration order, after that group's surviving drivers.
+    for source, keep in new_groups:
+        keepset = kept[source]
+        for d in authoritative.get(source, [ ]):
+            if d not in keepset:
+                keep.append(d)
+                keepset.add(d)
+                # If it was somewhere in the original list it's a move-in
+                # (already tallied as a move when removed); otherwise it's new.
+                if d not in listed_drivers:
+                    summary['added'] += 1
+
+    # Drop groups that are now empty AND have no drivers in the binary at all.
+    pruned = [ ]
+    for source, keep in new_groups:
+        if not keep and not authoritative.get(source):
+            summary['groups_removed'] += 1
+            continue
+        pruned.append([source, keep])
+    new_groups = pruned
+
+    # --- Insert brand-new source groups at natural-sorted positions ----------
+    # Any binary source not already present becomes a new group; its drivers
+    # are listed in binary registration (document) order.
+    existing_sources = set(g[0] for g in new_groups)
+    for source in collected.order:
+        if source in existing_sources:
+            continue
+        existing_sources.add(source)
+        summary['groups_added'] += 1
+        # Count only genuinely-new drivers; ones that merely moved in from an
+        # existing group were already tallied under 'moved'.
+        summary['added'] += sum(1 for d in authoritative[source] if d not in listed_drivers)
+        newentry = [source, list(authoritative[source])]
+        # Find the natural-sorted insertion index among current headers.
+        key = natural_sort_key(source)
+        pos = len(new_groups)
+        for idx, (s, _) in enumerate(new_groups):
+            if natural_sort_key(s) > key:
+                pos = idx
+                break
+        new_groups.insert(pos, newentry)
+
+    # --- Emit corrected text -------------------------------------------------
+    out_lines = list(header_lines)
+    for gi, (source, drivers) in enumerate(new_groups):
+        out_lines.append('@source:' + source)
+        out_lines.extend(drivers)
+        # Blank-line separator between groups (not after the last one).
+        if gi != len(new_groups) - 1:
+            out_lines.append('')
+
+    newtext = newline.join(out_lines)
+    if trailing_newline and out_lines:
+        newtext += newline
+
+    return newtext, summary
 
 
 def split_path(path):
@@ -757,6 +1042,7 @@ def parse_command_line():
 
     subparser = subparsers.add_parser('reconcilelist', help='reconcile driver list')
     subparser.add_argument('-l', '--list', metavar='<lstfile>', required=True, help='master driver list file')
+    subparser.add_argument('--fix', action='store_true', help='rewrite the list file in place to match the XML (opt-in; never used by CI)')
     subparser.add_argument('infoxml', metavar='<xmlfile>', nargs='?', help='XML system information file')
 
     return parser.parse_args()
@@ -1068,6 +1354,33 @@ if __name__ == '__main__':
     elif options.command == 'driverlist':
         DriverLister(options).write_source(sys.stdout)
     elif options.command == 'reconcilelist':
+        if getattr(options, 'fix', False):
+            # --fix is purely opt-in (CI never passes it).  Collect the
+            # authoritative mapping from the XML, rewrite the list in place,
+            # report a summary, and exit 0 on success.  We deliberately do NOT
+            # construct a DriverReconciler here: that would re-parse the (likely
+            # stale) list file we are about to repair.
+            if options.infoxml == '-':
+                collected = DriverReconciler.collect_xml(sys.stdin)
+            elif options.infoxml is not None:
+                try:
+                    xmlfile = io.open(options.infoxml, 'rb')
+                except IOError:
+                    sys.stderr.write('Unable to open system information file "%s"\n' % (options.infoxml, ))
+                    sys.exit(1)
+                with xmlfile:
+                    collected = DriverReconciler.collect_xml(xmlfile)
+            else:
+                sys.stderr.write('No system information file supplied for --fix\n')
+                sys.exit(1)
+            newtext, summary = fix_driver_list(options.list, collected)
+            with io.open(options.list, 'w', encoding='utf-8', newline='') as f:
+                f.write(newtext)
+            sys.stderr.write(
+                    'Fixed "%s": +%d driver(s), -%d driver(s), %d moved, +%d group(s), -%d group(s)\n'
+                    % (options.list, summary['added'], summary['removed'],
+                       summary['moved'], summary['groups_added'], summary['groups_removed']))
+            sys.exit(0)
         reconciler = DriverReconciler(options)
         if options.infoxml == '-':
             reconciler.reconcile_xml(sys.stdin)
