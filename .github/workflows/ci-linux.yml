@@ -24,7 +24,36 @@ permissions:
   contents: read
 
 jobs:
+  # Fast pre-flight that gates the multi-hour matrix legs (ADR 0005 decision #3).
+  # It builds only the tiny slice (SUBTARGET=tiny -> mametiny, ~95 drivers, minutes
+  # not hours), then runs -validate and the reconcile CHECK form on tiny.lst, so
+  # obvious breakage fails in minutes instead of after the full build. The reconcile
+  # step uses the CHECK form ONLY -- never --fix (--fix is a local-only developer
+  # tool and must never run in CI). The full build-linux matrix legs still run, but
+  # only after this job passes (see `needs: preflight` below), giving fail-fast
+  # feedback before the long legs start.
+  preflight:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@main
+      with:
+        fetch-depth: 0
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y libsdl2-dev libsdl2-ttf-dev libfontconfig-dev libasound2-dev libxinerama-dev libxi-dev qt6-base-dev qt6-base-dev-tools
+    - name: Build tiny slice
+      env:
+        SUBTARGET: tiny
+        TOOLS: 1
+      run: make -j3
+    - name: Validate
+      run: ./mametiny -validate
+    - name: Reconcile driver list (check only)
+      run: ./mametiny -listxml | python scripts/build/makedep.py reconcilelist -l src/mame/tiny.lst -
+
   build-linux:
+    needs: preflight
     strategy:
       matrix:
         compiler: [gcc, clang]

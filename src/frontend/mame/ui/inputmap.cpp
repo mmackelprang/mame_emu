@@ -343,8 +343,9 @@ void menu_input::recompute_metrics(uint32_t width, uint32_t height, float aspect
 {
 	menu::recompute_metrics(width, height, aspect);
 
-	// leave space for showing the input sequence below the menu
-	set_custom_space(0.0F, 2.0F * line_height() + 3.0F * tb_border());
+	// leave space for showing the input sequence and the set/append/toggle
+	// prompts below the menu
+	set_custom_space(0.0F, 3.0F * line_height() + 3.0F * tb_border());
 }
 
 
@@ -393,7 +394,8 @@ void menu_input::custom_render(uint32_t flags, void *selectedref, float top, flo
 			{
 				char const *const text[] = {
 					record_next ? appendprompt.c_str() : assignprompt.c_str(),
-					(!item.seq.empty() || item.defseq->empty()) ? clearprompt.c_str() : defaultprompt.c_str() };
+					(!item.seq.empty() || item.defseq->empty()) ? clearprompt.c_str() : defaultprompt.c_str(),
+					toggleprompt.c_str() };
 				draw_text_box(
 						std::begin(text), std::end(text),
 						origx1, origx2, origy2 + tb_border(), origy2 + bottom,
@@ -645,6 +647,11 @@ void menu_input::populate_sorted()
 	appendprompt = util::string_format(_("Press %1$s to append\n"), ui().get_general_input_setting(IPT_UI_SELECT));
 	clearprompt = util::string_format(_("Press %1$s to clear\n"), ui().get_general_input_setting(IPT_UI_CLEAR));
 	defaultprompt = util::string_format(_("Press %1$s to restore default\n"), ui().get_general_input_setting(IPT_UI_CLEAR));
+	// make the otherwise-opaque set-vs-append affordance explicit
+	toggleprompt = util::string_format(
+			_("Press %1$s/%2$s to switch between set and append\n"),
+			ui().get_general_input_setting(IPT_UI_LEFT),
+			ui().get_general_input_setting(IPT_UI_RIGHT));
 }
 
 } // namespace ui

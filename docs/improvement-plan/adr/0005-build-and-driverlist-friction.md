@@ -1,6 +1,6 @@
 # ADR 0005 — Build & driver-list friction reduction
 
-> **Status:** Proposed · **Phase:** P1 · **Owner:** TBD
+> **Status:** Done (boundaries H + I + J all shipped) · **Phase:** P1 · **Owner:** TBD
 > **Depends on:** none · **Related:** [0001](0001-differential-cpu-oracle.md) (shares the CI-feedback-speed goal)
 > **Spec:** [`docs/improvement-plan/specs/2026-06-24-mame-improvements-design.md`](../specs/2026-06-24-mame-improvements-design.md)
 > **Date:** 2026-06-24

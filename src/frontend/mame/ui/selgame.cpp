@@ -60,6 +60,7 @@ menu_select_game::menu_select_game(mame_ui_manager &mui, render_target &target, 
 	, m_searchlist()
 	, m_searched_fields(system_list::AVAIL_NONE)
 	, m_populated_favorites(false)
+	, m_nosystems(false)
 {
 	std::string error_string, last_filter, sub_filter;
 	ui_options &moptions = mui.options();
@@ -138,6 +139,31 @@ void menu_select_game::recompute_metrics(uint32_t width, uint32_t height, float 
 
 	// configure the custom rendering
 	set_custom_space(3.0F * line_height() + 5.0F * tb_border(), 4.0F * line_height() + 3.0F * tb_border());
+}
+
+
+void menu_select_game::custom_render(uint32_t flags, void *selectedref, float top, float bottom, float origx1, float origy1, float origx2, float origy2)
+{
+	// draw the usual panels/info first
+	menu_select_launch::custom_render(flags, selectedref, top, bottom, origx1, origy1, origx2, origy2);
+
+	// when no systems are available to list (e.g. an empty or mis-set rompath),
+	// surface the same guidance the simple selector shows so a new user isn't
+	// left staring at an empty menu with no idea what went wrong
+	if (m_nosystems)
+	{
+		ui().draw_text_box(
+				target(),
+				string_format(
+						_("No system ROMs found. Please check the rompath setting specified in the %1$s.ini file.\n\n"
+						"If this is your first time using %2$s, please see the %2$s.pdf file in "
+						"the docs folder for information on setting up and using %2$s."),
+						emulator_info::get_configname(),
+						emulator_info::get_appname()),
+				text_layout::text_justify::CENTER,
+				0.5f, 0.5f,
+				UI_RED_COLOR);
+	}
 }
 
 
@@ -348,6 +374,11 @@ void menu_select_game::populate()
 			}
 		}
 
+		// note an entirely empty list with no active search so custom_render
+		// can show a "no system ROMs found - check rompath" empty state, the
+		// full-selector counterpart to the simple selector's guidance
+		m_nosystems = m_displaylist.empty() && m_search.empty();
+
 		// iterate over entries
 		int curitem = 0;
 		for (ui_system_info const &elem : m_displaylist)
@@ -362,6 +393,9 @@ void menu_select_game::populate()
 	}
 	else
 	{
+		// the favorites view is never the "no systems available" empty state
+		m_nosystems = false;
+
 		// populate favorites list
 		if (!m_populated_favorites)
 			m_prev_selected = nullptr;

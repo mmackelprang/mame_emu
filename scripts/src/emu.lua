@@ -200,6 +200,8 @@ files {
 	MAME_DIR .. "src/emu/resampler.h",
 	MAME_DIR .. "src/emu/romload.cpp",
 	MAME_DIR .. "src/emu/romload.h",
+	MAME_DIR .. "src/emu/romload_messages.cpp",
+	MAME_DIR .. "src/emu/romload_messages.h",
 	MAME_DIR .. "src/emu/romentry.h",
 	MAME_DIR .. "src/emu/romentry.cpp",
 	MAME_DIR .. "src/emu/save.cpp",

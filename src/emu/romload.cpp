@@ -11,6 +11,8 @@
 #include "emu.h"
 #include "romload.h"
 
+#include "romload_messages.h"
+
 #include "drivenum.h"
 #include "emuopts.h"
 #include "fileio.h"
@@ -666,9 +668,20 @@ void rom_load_manager::display_rom_load_results(bool from_list)
 	// if we had errors, they are fatal
 	if (m_errors != 0)
 	{
-		// create the error message and exit fatally
+		// the per-file detail (names, reasons) was accumulated above; print it first
 		osd_printf_error("%s", m_errorstring);
-		throw emu_fatalerror(EMU_ERR_MISSING_FILES, "Required files are missing, the machine cannot be run.");
+
+		// then exit fatally with an actionable message that names the system and
+		// points at the tools that show the full audit detail (the detail above is
+		// also available any time via -verifyroms or the in-UI "Audit Media" menu)
+		game_driver const &system(machine().system());
+		throw emu_fatalerror(
+				EMU_ERR_MISSING_FILES,
+				"%s",
+				romload::make_missing_files_message(
+					system.type.fullname(),
+					system.name,
+					emulator_info::get_appname_lower()));
 	}
 
 	// if we had warnings, output them, but continue

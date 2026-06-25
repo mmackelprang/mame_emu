@@ -71,9 +71,9 @@ the per-phase task plans (`plan/phase-{1,2,3}-*.md`) from these ADRs.
 |---|---|---|---|
 | 0001 | Proposed | 5 | Catch2 harness in `mametests`; SingleStepTests corpus fetched (not vendored) via pinned/hashed manifest; gates `mametests` + `srcclean` in CI. |
 | 0002 | Proposed | 5 | Targets the **new microcode core** (`m68000.cpp`), not legacy Musashi. Increment 1 = plain 68000 common path; rest `cfunc_` to interpreter. Oracle-gated. |
-| 0003 | Proposed | 4 | Pure UX; surfaces already-present data. All copy via the `_()` i18n macro → touches the translation catalog. Golden-output CLI tests. |
+| 0003 | Done | 4 | Pure UX; surfaces already-present data. All copy via the `_()` i18n macro. Golden-output CLI tests. **All three groups shipped** — A (CLI discoverability, T10–T12 / PR boundary E): `clihelp.{cpp,h}` + golden `[cli]` tests. B (actionable ROM/audit errors, T13–T14 / PR boundary F): `romload_messages.{cpp,h}`; missing-ROM error names the system and points at `-verifyroms` / the Audit Media menu, which now logs per-ROM audit detail. C (internal-UI guidance, T15–T18 / PR boundary G): full-selector empty-state box, slot-menu device descriptions + reboot notice, and an explicit set/append input hint. Internal-UI items (C1–C4, B2) require manual UI smoke per the plan. |
 | 0004 | Proposed | 5 | HTTP server is **already frontend-owned** (`machine_manager`) and created before any machine — launcher endpoints just need frontend-scoped registration. Read-only first; localhost-default + traversal hardening required. |
-| 0005 | Proposed | 5 | Tooling-only. Staleness detection / auto-REGENIE; `reconcilelist --fix` autofix; fast CI pre-flight. Unit-tested. |
+| 0005 | **Done** | 5 | Tooling-only — **all three boundaries shipped.** H: source-staleness detector + `make check-sources` (PR #2). I: `reconcilelist --fix` autofix + byte-exact golden tests; CI runs check mode only (PR #6). J: fast `preflight` CI job (tiny build + `-validate` + reconcile check, gating the multi-hour legs) + tooling docs (`scripts/build/README-friction.md`). Additive/upstream-friendly; CI never runs `--fix`. Unit-tested. |
 
 **Cross-cutting test mandate (all phases):** every ADR carries an explicit Testing &
 validation section. P1 first wires `make TESTS=1 && ./mametests` and `srcclean` into

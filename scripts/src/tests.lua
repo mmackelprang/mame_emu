@@ -110,6 +110,13 @@ project("mametests")
 		MAME_DIR .. "tests/lib/util/options.cpp",
 		MAME_DIR .. "tests/emu/attotime.cpp",
 		MAME_DIR .. "tests/emu/video/rgbutil.cpp",
+		MAME_DIR .. "tests/frontend/clitext.cpp",
+		-- CLI discoverability helpers under test (no emulation-core deps)
+		MAME_DIR .. "src/frontend/mame/clihelp.cpp",
+		MAME_DIR .. "src/frontend/mame/clihelp.h",
+		-- actionable ROM-load error message formatter (no emulation-core deps)
+		MAME_DIR .. "src/emu/romload_messages.cpp",
+		MAME_DIR .. "src/emu/romload_messages.h",
 		MAME_DIR .. "tests/emu/cpu/cpu_test_harness.cpp",
 		MAME_DIR .. "tests/emu/cpu/cpu_test_harness.h",
 		MAME_DIR .. "tests/emu/cpu/cpuoracle.cpp",

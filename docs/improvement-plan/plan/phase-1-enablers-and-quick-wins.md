@@ -414,7 +414,9 @@ and m6502 (cleanest), then folding in m68000.
   **Green:** exact-match assertions pass; re-check reports clean.
 
 > **PR boundary I** (Tasks 21–22): reconciler autofix + its golden tests (ship together —
-> the golden test is the safety net for the file-churn risk).
+> the golden test is the safety net for the file-churn risk). **Status: ✅ Done** —
+> `reconcilelist --fix` landed in `scripts/build/makedep.py` with 11 byte-exact golden
+> tests (`scripts/build/tests/test_reconcile_fix.py`); CI still runs check mode only.
 
 ### Task 23 — Fast CI pre-flight job
 
@@ -438,7 +440,12 @@ and m6502 (cleanest), then folding in m68000.
   and the fast pre-flight, with upstreamability notes (additive/opt-in). No code.
 - **Test/Validation:** Markdown only; `srcclean`/link check. **Green:** doc renders.
 
-> **PR boundary J** (Tasks 23–24): fast pre-flight + docs.
+> **PR boundary J** (Tasks 23–24): fast pre-flight + docs. **Status: ✅ Done** — a
+> `preflight` job in `.github/workflows/ci-linux.yml` builds the `SUBTARGET=tiny`
+> slice and runs `-validate` + reconcile **check** (never `--fix`), gating the
+> multi-hour legs via `needs: preflight`; tooling docs at
+> `scripts/build/README-friction.md`. **With H + I + J merged, ADR 0005 is fully
+> Done.**
 
 ---
 
