@@ -34,6 +34,7 @@ public:
 
 protected:
 	virtual void recompute_metrics(uint32_t width, uint32_t height, float aspect) override;
+	virtual void custom_render(uint32_t flags, void *selectedref, float top, float bottom, float origx1, float origy1, float origx2, float origy2) override;
 
 	void menu_activated() override;
 	void menu_deactivated() override;
@@ -55,6 +56,7 @@ private:
 	std::vector<std::pair<double, std::reference_wrapper<ui_system_info const> > > m_searchlist;
 	unsigned m_searched_fields;
 	bool m_populated_favorites;
+	bool m_nosystems;
 
 	static bool s_first_start;
 

@@ -183,14 +183,15 @@ void menu_slot_devices::populate()
 		// does this slot have any selectable options?
 		bool has_selectable_options = slot.has_selectable_options();
 
-		// name this option
+		// name this option, showing the human-readable device description
+		// alongside the short option code so the list is meaningful at a glance
 		std::string opt_name(DIVIDER);
 		device_slot_interface::slot_option const *option = get_current_option(slot);
 		if (option)
 		{
 			opt_name = has_selectable_options
-					? option->name()
-					: string_format(_("%s [internal]"), option->name());
+					? string_format(_("%1$s (%2$s)"), option->devtype().fullname(), option->name())
+					: string_format(_("%1$s (%2$s) [internal]"), option->devtype().fullname(), option->name());
 		}
 
 		// choose item flags
@@ -213,8 +214,9 @@ void menu_slot_devices::recompute_metrics(uint32_t width, uint32_t height, float
 {
 	menu::recompute_metrics(width, height, aspect);
 
-	// leave space for the name of the current option at the bottom
-	set_custom_space(0.0F, line_height() + 3.0F * tb_border());
+	// leave space for the name of the current option plus the reboot-notice
+	// line at the bottom
+	set_custom_space(0.0F, (2.0F * line_height()) + (3.0F * tb_border()));
 }
 
 
@@ -228,7 +230,21 @@ void menu_slot_devices::custom_render(uint32_t flags, void *selectedref, float t
 	{
 		device_slot_interface *const slot(reinterpret_cast<device_slot_interface *>(selectedref));
 		device_slot_interface::slot_option const *const option(get_current_option(*slot));
-		char const *const text[] = { option ? option->devtype().fullname() : _("[empty slot]") };
+		// remind the user that a slot change only takes effect after a reboot,
+		// which the "Reset System" item below performs (the change is otherwise
+		// staged silently)
+		char const *const text[] = {
+				option ? option->devtype().fullname() : _("[empty slot]"),
+				_("Slot changes apply after a reboot (use \"Reset System\" below).") };
+		draw_text_box(
+				std::begin(text), std::end(text),
+				origx1, origx2, origy2 + tb_border(), origy2 + bottom,
+				text_layout::text_justify::CENTER, text_layout::word_wrapping::TRUNCATE, false,
+				ui().colors().text_color(), ui().colors().background_color());
+	}
+	else if (ITEMREF_RESET == selectedref)
+	{
+		char const *const text[] = { _("Reboots the machine to apply any slot changes.") };
 		draw_text_box(
 				std::begin(text), std::end(text),
 				origx1, origx2, origy2 + tb_border(), origy2 + bottom,
