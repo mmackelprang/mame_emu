@@ -577,6 +577,18 @@ public:
 	// cleanly).  The test marks exactly these as the branch-self-loop residual.
 	virtual bool oracle_did_not_retire() const override { return m_did_not_retire; }
 
+	// Expose the live DRC latch so Leg B can assert the DRC actually engaged.
+	// m_isdrc is protected in m68000_device -- reachable from this subclass.
+	virtual bool oracle_is_drc() const override { return m_isdrc; }
+
+	// Boundary L scopes the m68000 DRC arm to type()==M68000 only.  This oracle
+	// device IS a plain 68000 (it derives directly from m68000_device with no
+	// behavioural override), so it opts the DRC arm in for its own ORACLE_M68000
+	// type -- otherwise Leg B could never engage the DRC (its anti-vacuity guard
+	// would always fail).  The DRC arm runs the SAME interpreter microcode loop
+	// via the cfunc, so this is byte-identical to the interpreter arm.
+	virtual bool drc_supported_for_type() const override { return true; }
+
 private:
 	u32 m_retired_au = 0;
 	u32 m_retired_pc = 0;
@@ -1058,6 +1070,14 @@ bool cpu_test_harness::run_with_machine(const std::function<void ()> &body)
 {
 	m_options = std::make_unique<emu_options>();
 	m_options->set_value(OPTION_THROTTLE, false, OPTION_PRIORITY_MAXIMUM);
+	// Leg B: select the execution arm.  Default (m_drc=false) leaves OPTION_DRC at
+	// the harness's chosen value for Leg A (interpreter), preserving Leg A exactly;
+	// set_drc(true) flips OPTION_DRC on so the m68000 oracle device latches m_isdrc.
+	m_options->set_value(OPTION_DRC, m_drc, OPTION_PRIORITY_MAXIMUM);
+	// Optional C-backend leg: CPUORACLE_M68_DRC_C=1 forces the drcbec interpreter
+	// backend (OPTION_DRC_USE_C) so Leg B can run on the portable C backend matrix.
+	if(std::getenv("CPUORACLE_M68_DRC_C") != nullptr)
+		m_options->set_value(OPTION_DRC_USE_C, true, OPTION_PRIORITY_MAXIMUM);
 	m_options->set_system_name(m_desc.driver->name);
 
 	m_osd = std::unique_ptr<osd_interface, void (*)(osd_interface *)>(new test_osd, &delete_test_osd);
@@ -1095,6 +1115,16 @@ bool cpu_test_harness::run_with_machine(const std::function<void ()> &body)
 
 	g_reset_hook = nullptr;
 	return ran;
+}
+
+void cpu_test_harness::set_drc(bool enable)
+{
+	m_drc = enable;
+}
+
+bool cpu_test_harness::drc_engaged() const
+{
+	return m_stepper ? m_stepper->oracle_is_drc() : false;
 }
 
 void cpu_test_harness::reset_cpu()

@@ -14,7 +14,8 @@ register / flag / RAM / cycle equality, one instruction at a time.
   single-CPU `running_machine`, applies a fixture, single-steps exactly one
   instruction, reads the result back.
 - **Test cases:** `tests/emu/cpu/cpuoracle.cpp` — the `[cpu][z80]`,
-  `[cpu][m6502]`, `[cpu][m68000]` Catch2 cases. Built into `mametests`.
+  `[cpu][m6502]`, `[cpu][m68000]` (Leg A) and `[cpu][m68000][drc]` (Leg B)
+  Catch2 cases. Built into `mametests`.
 - **Fetcher:** `fetch_vectors.py` — downloads + verifies the pinned corpus into
   the gitignored `build/cpuoracle/<core>/` cache.
 - **Manifest:** `manifest.json` — the only committed corpus artifact: a pinned
@@ -34,6 +35,30 @@ green without the corpus). No network access at test-run time.
 
 Per-core fast-run knob: `CPUORACLE_MAX_FILES=N` caps the number of fixture files
 (local iteration only — the canonical CI gate runs the full corpus).
+
+## Invoking each m68000 leg
+
+The m68000 has two oracle legs (ADR 0006):
+
+```sh
+./mametests "[m68000]"                              # Leg A: interpreter vs corpus probe
+./mametests "[m68000][drc]"                         # Leg B: interpreter == DRC, register/flag/RAM/CYCLE exact (x64 backend)
+CPUORACLE_M68_DRC_C=1 ./mametests "[m68000][drc]"   # Leg B on the portable C backend (drcbec)
+```
+
+- **Leg A** (`[cpu][m68000]`) replays the corpus against the interpreter (`-drc 0`)
+  and reports the documented residual; it is the high-coverage conformance probe.
+- **Leg B** (`[cpu][m68000][drc]`) is the load-bearing Phase-2 gate: it runs the
+  SAME corpus inputs through BOTH the interpreter (`-drc 0`) and the DRC (`-drc 1`)
+  and REQUIREs the two MAME execution paths agree register-, flag-, RAM- and
+  **cycle**-exact. It is **corpus-immune** — the corpus JSON supplies only the
+  per-case inputs; the comparison never consults the corpus "final" values. An
+  anti-vacuity guard REQUIREs the DRC actually engaged on the oracle device (so
+  Leg B cannot pass with the DRC silently off), and the comparison includes
+  consumed cycles.
+- `CPUORACLE_M68_DRC_C=1` forces the portable C UML backend (`drcbec`,
+  `OPTION_DRC_USE_C`) so Leg B runs on the C-backend matrix. The arm64 backend
+  (`drcbearm64`) is deferred to the appserver/CI matrix.
 
 ## Running in CI (ADR 0001 boundary D)
 

@@ -242,9 +242,11 @@ interpreter — never the corpus — is the authority for both legs.
   `-drc_use_c 1` / `OPTION_DRC_USE_C`), and — where available — `drcbearm64`, so the
   port is correct on all three UML backends, not just the host's native one.
 - **Structural gate:** `./mame -validate` stays green (the device still validates).
-- **Iteration build:** `make SOURCES=src/devices/cpu/m68000/m68000.cpp` (after
-  `make REGENIE=1` for the new `.cpp` files) for fast core-only rebuilds; a
-  representative driver build (e.g. a Sega System 16 driver) for an integration
+- **Iteration build:** the m68000 core builds as part of the `mametests` (`TESTS=1`)
+  target — `make REGENIE=1 && make TESTS=1 && ./mametests "[m68000]"` for fast
+  core+oracle rebuilds. Do **not** use `make SOURCES=src/devices/cpu/m68000/m68000.cpp`:
+  `SOURCES` filters by *driver*, and a CPU device has no drivers, so GENie errors. A
+  representative driver build (e.g. a Sega System 16 driver) is used for an integration
   smoke test.
 - **Spot integration:** boot a handful of high-value 68000 games under `-drc 1` and
   `-drc 0` and confirm identical behavior (in addition to the oracle), as a

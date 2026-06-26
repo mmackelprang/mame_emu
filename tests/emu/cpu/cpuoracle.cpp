@@ -30,6 +30,7 @@
 #include "rapidjson/error/en.h"
 
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -37,6 +38,7 @@
 #include <map>
 #include <set>
 #include <string>
+#include <utility>
 #include <vector>
 
 
@@ -987,4 +989,245 @@ TEST_CASE("CPU oracle m68000 SingleStepTests", "[cpu][m68000]")
 		WARN("  STATE-FILE  " << kv.first << " : " << kv.second);
 	for (const auto &kv : diag_cycle_by_file)
 		WARN("  CYCLE-FILE  " << kv.first << " : " << kv.second);
+}
+
+
+//**************************************************************************
+//  M68000 ORACLE -- LEG B (interpreter == DRC, cycle-exact)
+//**************************************************************************
+//
+//  The load-bearing Phase-2 gate (ADR 0006 Leg B).  It runs the SAME corpus
+//  inputs through TWO MAME execution paths -- the interpreter (-drc 0) and the
+//  DRC (-drc 1) -- and REQUIREs the two paths agree register-, flag-, RAM- and
+//  CYCLE-exact on every case.  It is CORPUS-IMMUNE: the corpus JSON supplies
+//  only the per-case INPUTS; the comparison NEVER consults the corpus "final"
+//  expected values (so a corpus provenance limitation cannot make Leg B fail or
+//  pass spuriously).
+//
+//  Anti-vacuity guards (so Leg B cannot pass with the DRC silently off):
+//    #1  REQUIRE the DRC harness's oracle device actually engaged the DRC
+//        (drc_engaged() == true), and REQUIRE the interpreter harness did NOT.
+//    #2  The per-case comparison INCLUDES consumed cycles -- the whole point of
+//        the cycle-exact gate.
+//
+//  At boundary L the DRC dispatcher is 100% cfunc (it runs the interpreter loop
+//  for the granted quantum), so the two paths are identical BY CONSTRUCTION and
+//  Leg B is green.  Later boundaries grow native UML emission; Leg B regresses
+//  against exactly this gate.
+//
+//  Backend toggles (documented in tests/cpuoracle/README.md):
+//    ./mametests "[m68000][drc]"               -- x64 native backend (drcbex64)
+//    CPUORACLE_M68_DRC_C=1 ./mametests "[m68000][drc]" -- portable C backend (drcbec)
+
+TEST_CASE("CPU oracle m68000 Leg B (interpreter == DRC)", "[cpu][m68000][drc]")
+{
+	std::vector<fs::path> fixtures = collect_fixtures(ORACLE_M68000_DIR);
+	if (fixtures.empty())
+	{
+		SUCCEED("m68000 fixtures not present -- run tests/cpuoracle/fetch_vectors.py --cores m68000; skipping");
+		return;
+	}
+
+	const std::size_t cap = fixture_file_cap();
+	if (cap != 0 && fixtures.size() > cap)
+		fixtures.resize(cap);
+
+	// One observed tuple per replayed case (the readback the Leg-A loop does).
+	struct ObservedCase
+	{
+		std::string file;
+		std::string name;
+		std::array<std::uint64_t, 17> da;   // D0-D7, A0-A6, USP, SP (the 17 m_da[] slots)
+		std::uint16_t sr;
+		std::uint32_t au_pc;                // retired PC in the corpus's m_au convention
+		std::vector<std::pair<std::uint32_t, std::uint8_t>> ram;  // watched final-RAM cells
+		int consumed;                       // cycles consumed (anti-vacuity guard #2)
+	};
+
+	// The register-field order matching ObservedCase::da[0..16].
+	static const char *const k_da_fields[17] = {
+		"d0", "d1", "d2", "d3", "d4", "d5", "d6", "d7",
+		"a0", "a1", "a2", "a3", "a4", "a5", "a6",
+		"usp", "ssp",
+	};
+
+	// Apply ONE case's initial state to a harness exactly as the Leg-A loop does
+	// (RAM-zero-then-seed, SR, regs, PC-4, ram_watch) and read back the observed
+	// tuple after a single step.  Factored so BOTH legs apply byte-identical inputs.
+	auto run_one_case =
+			[&] (cpuoracle::cpu_test_harness &harness, const std::string &fname,
+					const rapidjson::Value &test) -> ObservedCase
+			{
+				const rapidjson::Value &initial = test["initial"];
+				const rapidjson::Value &final = test["final"];
+
+				REQUIRE(test.HasMember("length"));
+				const int expected_cycles = int(test["length"].GetInt64());
+
+				// --- apply initial state (identical to Leg A) ---
+				harness.prepare_case();
+				if (initial.HasMember("ram") && initial["ram"].IsArray())
+					for (const auto &cell : initial["ram"].GetArray())
+						harness.write_ram(std::uint32_t(cell[0].GetInt64()), 0);
+				if (final.HasMember("ram") && final["ram"].IsArray())
+					for (const auto &cell : final["ram"].GetArray())
+						harness.write_ram(std::uint32_t(cell[0].GetInt64()), 0);
+				apply_ram(harness, initial);
+				if (initial.HasMember("sr") && initial["sr"].IsInt())
+					harness.set_reg("sr", std::uint64_t(initial["sr"].GetInt64()));
+				for (auto it = initial.MemberBegin(); it != initial.MemberEnd(); ++it)
+				{
+					const char *name = it->name.GetString();
+					if (std::string(name) == "pc" || std::string(name) == "sr")
+						continue;
+					if (!it->value.IsInt() && !it->value.IsUint() && !it->value.IsInt64() && !it->value.IsUint64())
+						continue;
+					if (harness.has_reg(name))
+						harness.set_reg(name, std::uint64_t(it->value.GetInt64()));
+				}
+				if (initial.HasMember("pc") && initial["pc"].IsInt64())
+					harness.set_reg("pc", std::uint32_t(initial["pc"].GetInt64()) - 4);
+
+				// register the case's final-RAM addresses as the retirement watch set
+				std::vector<std::uint32_t> watch;
+				if (final.HasMember("ram") && final["ram"].IsArray())
+				{
+					watch.reserve(final["ram"].Size());
+					for (const auto &cell : final["ram"].GetArray())
+						watch.push_back(std::uint32_t(cell[0].GetInt64()));
+				}
+				harness.set_ram_watch(watch);
+
+				// --- step exactly one instruction ---
+				const int consumed = harness.step_one_instruction(expected_cycles);
+
+				// --- read back the observed tuple (NOT the corpus expected values) ---
+				ObservedCase obs;
+				obs.file = fname;
+				obs.name = test.HasMember("name") ? test["name"].GetString() : "<unnamed>";
+				obs.consumed = consumed;
+
+				for (int i = 0; i < 17; i++)
+				{
+					std::uint64_t snap = 0;
+					obs.da[i] = harness.snapshot_reg(k_da_fields[i], snap)
+							? snap : harness.get_reg(k_da_fields[i]);
+				}
+				{
+					std::uint64_t snap = 0;
+					obs.sr = std::uint16_t(harness.snapshot_reg("sr", snap)
+							? snap : harness.get_reg("sr"));
+				}
+				{
+					std::uint32_t au = 0;
+					obs.au_pc = harness.retired_pc(au) ? au : std::uint32_t(harness.get_reg("pc"));
+				}
+				// Snapshot the watched final-RAM cells (same addresses both legs read).
+				for (std::uint32_t addr : watch)
+				{
+					std::uint8_t b = 0;
+					const std::uint8_t v = harness.snapshot_ram(addr, b) ? b : harness.read_ram(addr);
+					obs.ram.emplace_back(addr, v);
+				}
+				return obs;
+			};
+
+	// Replay the whole corpus through one harness (one execution arm) and collect
+	// the per-case observations.  `expect_drc` is the anti-vacuity assertion: the
+	// DRC harness MUST report drc_engaged(), the interpreter harness MUST NOT.
+	auto replay_all =
+			[&] (bool drc, bool expect_drc, std::vector<ObservedCase> &out)
+			{
+				cpuoracle::cpu_test_harness harness(cpuoracle::m68000_core_descriptor());
+				harness.set_drc(drc);
+				bool checked_engaged = false;
+				const bool ran = harness.run_with_machine(
+						[&] ()
+						{
+							// Anti-vacuity guard #1: the DRC must actually be engaged on the
+							// oracle device (or actually OFF on the interpreter harness).  If
+							// this fails, Leg B fails -- it cannot pass with DRC silently off.
+							REQUIRE(harness.drc_engaged() == expect_drc);
+							checked_engaged = true;
+
+							for (const fs::path &path : fixtures)
+							{
+								const std::string fname = path.filename().string();
+								std::string text;
+								REQUIRE(read_file(path, text));
+
+								rapidjson::Document doc;
+								doc.Parse(text.c_str());
+								INFO("fixture: " << fname);
+								REQUIRE_FALSE(doc.HasParseError());
+								REQUIRE(doc.IsArray());
+
+								for (const auto &test : doc.GetArray())
+									out.push_back(run_one_case(harness, fname, test));
+							}
+						});
+				REQUIRE(ran);
+				REQUIRE(checked_engaged);
+			};
+
+	// Leg B compares two MAME execution paths.  Run the interpreter arm first,
+	// then the DRC arm, over the SAME case loop.
+	std::vector<ObservedCase> interp;
+	std::vector<ObservedCase> drc;
+	replay_all(/*drc=*/false, /*expect_drc=*/false, interp);
+	replay_all(/*drc=*/true,  /*expect_drc=*/true,  drc);
+
+	// Same number of cases (both legs walked the identical fixtures), and nonempty.
+	REQUIRE(!interp.empty());
+	REQUIRE(interp.size() == drc.size());
+
+	// Element-by-element exact comparison: registers, flags, retired PC, RAM, and
+	// (anti-vacuity guard #2) consumed cycles.
+	std::size_t compared = 0;
+	for (std::size_t i = 0; i < interp.size(); i++)
+	{
+		const ObservedCase &a = interp[i];
+		const ObservedCase &b = drc[i];
+
+		INFO("case index " << i << "  file: " << a.file << "  name: " << a.name);
+
+		// the two legs must be walking the same case
+		REQUIRE(a.file == b.file);
+		REQUIRE(a.name == b.name);
+
+		for (int r = 0; r < 17; r++)
+		{
+			INFO("field " << k_da_fields[r]
+					<< " interp=" << a.da[r] << " drc=" << b.da[r]);
+			REQUIRE(a.da[r] == b.da[r]);
+		}
+
+		{
+			INFO("field sr interp=" << a.sr << " drc=" << b.sr);
+			REQUIRE(a.sr == b.sr);
+		}
+		{
+			INFO("field pc(au) interp=" << a.au_pc << " drc=" << b.au_pc);
+			REQUIRE(a.au_pc == b.au_pc);
+		}
+
+		REQUIRE(a.ram.size() == b.ram.size());
+		for (std::size_t k = 0; k < a.ram.size(); k++)
+		{
+			INFO("field ram[" << a.ram[k].first << "] interp=" << int(a.ram[k].second)
+					<< " drc=" << int(b.ram[k].second));
+			REQUIRE(a.ram[k].first == b.ram[k].first);
+			REQUIRE(a.ram[k].second == b.ram[k].second);
+		}
+
+		{
+			INFO("field cycles interp=" << a.consumed << " drc=" << b.consumed);
+			REQUIRE(a.consumed == b.consumed);
+		}
+
+		++compared;
+	}
+
+	WARN("m68000 oracle [Leg B]: " << fixtures.size() << " fixtures, " << compared
+			<< " cases compared (interpreter == DRC, register/flag/RAM/CYCLE exact); all equal.");
 }

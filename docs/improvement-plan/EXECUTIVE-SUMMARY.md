@@ -1,13 +1,18 @@
 # MAME Improvement Program — Executive Summary
 
-*Living status document. Last updated: 2026-06-25 · `main` @ `4aab9a94` (+ boundary D)*
+*Living status document. Last updated: 2026-06-26 · Phase 2 in progress (boundaries K + L shipped)*
 
 > **Headline:** Phase 1 (enablers + quick wins) is **complete** — all boundaries A–J
 > merged, and boundary D now runs `mametests` (the differential CPU oracle) + `srcclean`
-> in CI for the first time on all three OS legs. **No runtime emulation speedup has
-> shipped yet** — that is Phase 2 (m68000 DRC), which is designed but not built. What has
-> shipped is the **correctness safety-net, UX, and developer-experience** work that makes
-> the performance work safe to attempt. Only Phases 2 and 3 remain.
+> in CI for the first time on all three OS legs. **Phase 2 (m68000 DRC) has now started:**
+> boundary K (the generated DRC decode-descriptor table) and boundary L (the DRC frontend
+> skeleton + dual-path `execute_run()` plumbing with a 100% `cfunc_` dispatcher) are
+> shipped — the latter **lights up oracle Leg B** (interpreter ≡ DRC, register/flag/RAM/
+> **cycle** exact on the x64 + C UML backends), the cycle-exact gate every later DRC PR
+> regresses against. **No native runtime speedup has shipped yet** — that arrives at
+> boundary M (first native UML emission). What has shipped so far is the correctness
+> safety-net, UX, developer-experience work, and now the DRC scaffolding + comparison
+> mechanism that make the performance work safe to land. Phases 2 (in progress) and 3 remain.
 
 ## 1. Program at a glance
 
@@ -19,7 +24,7 @@ dependency-ordered phases.
 | **P1** | Pick 1 / ADR 0001 — Differential CPU oracle | Correctness safety net | **✅ Done** — z80 ✅ · m6502 ✅ · m68000 ✅ Leg-A probe ~99.6% state / ~99.3% cycle ([ADR 0006](adr/0006-m68000-oracle-gate-definition.md); Leg B = the Phase-2 gate) · **CI-wiring (boundary D) merged** (`mametests` + `srcclean` on all 3 legs; Linux runs the full corpus) |
 | **P1** | Pick 3 / ADR 0003 — Front-end usability | End-user UX | **✅ Done** (PRs #3 / #4 / #5) |
 | **P1** | Pick 5 / ADR 0005 — Build/list friction | Developer experience | **✅ Done** (PRs #2 / #6 / #7) |
-| **P2** | Pick 2 / ADR 0002 — m68000 → DRCUML | **Runtime performance** | Designed, **not started** (hard-gated on the m68000 oracle) |
+| **P2** | Pick 2 / ADR 0002 — m68000 → DRCUML | **Runtime performance** | **🚧 In progress** — boundary K (DRC descriptor table, PR #22) + boundary L (frontend skeleton + dual-path plumbing, 100% `cfunc_`; **oracle Leg B lit, cycle-exact on x64 + C backends**, PR #23) shipped · native UML emission (boundary M) next |
 | **P3** | Pick 4 / ADR 0004 — Web control surface | New capability | Designed, not started |
 
 **Phase 1 fully merged** (boundaries A–J): the fetcher (#1), the z80/m6502/m68000 oracle

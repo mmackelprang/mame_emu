@@ -5,6 +5,32 @@
 #include "m68000.h"
 #include "m68kdasm.h"
 
+#include "m68000fe.h"
+
+#include "cpu/drcuml.h"
+#include "cpu/drcumlsh.h"
+#include "cpu/drccache.h"
+
+#include "emuopts.h"
+
+
+// DRC exit codes (local, mirroring ppcdrc.cpp / mips3drc.cpp).  The boundary-L
+// entry block only ever exits OUT_OF_CYCLES; the others exist for fidelity to
+// the template (the full execute_run_drc() switch handles them).
+#define EXECUTE_OUT_OF_CYCLES           0
+#define EXECUTE_MISSING_CODE            1
+#define EXECUTE_UNMAPPED_CODE           2
+#define EXECUTE_RESET_CACHE             3
+
+// DRC front-end compile-window constants (analogous to mips3/ppc).  68000
+// opcodes are 2..10 bytes; the window is expressed in bytes.
+namespace {
+	constexpr u32 COMPILE_BACKWARDS_BYTES = 128;
+	constexpr u32 COMPILE_FORWARDS_BYTES  = 512;
+	constexpr u32 COMPILE_MAX_SEQUENCE    = 64;
+}
+
+
 DEFINE_DEVICE_TYPE(M68000,      m68000_device,      "m68000",       "Motorola MC68000")
 
 std::unique_ptr<util::disasm_interface> m68000_device::create_disassembler()
@@ -29,8 +55,29 @@ m68000_device::m68000_device(const machine_config &mconfig, device_type type, co
 	  m_mmu(nullptr),
 	  m_disable_spaces(false),
 	  m_disable_specifics(false),
-	  m_disable_interrupt_callback(false)
+	  m_disable_interrupt_callback(false),
+	  m_drc_cache(DRC_CACHE_SIZE),
+	  m_entry(nullptr),
+	  m_nocode(nullptr),
+	  m_out_of_cycles(nullptr),
+	  m_drcoptions(0),
+	  m_cache_dirty(true),
+	  m_isdrc(false)
 {
+}
+
+// Out-of-line so the std::unique_ptr<frontend>/<drcuml_state> members are
+// destroyed where those types are complete (m68000fe.h / drcuml.h are included
+// in this TU); without it every TU that destroys an m68000_device would need
+// the full frontend definition.
+m68000_device::~m68000_device()
+{
+}
+
+bool m68000_device::drc_supported_for_type() const
+{
+	// Boundary L scopes the DRC arm to the plain M68000 only.
+	return type() == M68000;
 }
 
 void m68000_device::set_current_mmu(mmu *mmu)
@@ -146,6 +193,25 @@ u16 m68000_device::get_fc() const noexcept
 
 void m68000_device::execute_run()
 {
+	// Dual-path dispatch.  The interpreter arm is byte-for-byte unchanged (it is
+	// execute_run_interpreter(), extracted verbatim below).  The DRC arm runs a
+	// 100%-cfunc dispatcher whose compiled block does nothing but call the SAME
+	// interpreter loop for the granted quantum -- so the two arms are identical
+	// by construction (this is what lights up oracle Leg B).  m_isdrc is latched
+	// from allow_drc() in device_start (default OPTION_DRC=1 means DRC is on).
+	if(m_isdrc)
+		execute_run_drc();
+	else
+		execute_run_interpreter();
+}
+
+// The original microcode loop, extracted VERBATIM from execute_run() (m68000.cpp
+// lines 147-181 at boundary K).  This is the interpreter authority -- its logic
+// must never be altered to match the DRC.  It is called from the interpreter arm
+// of execute_run() AND from the DRC cfunc (func_interpret_quantum), which runs it
+// for whatever m_icount budget the scheduler/dispatcher granted.
+void m68000_device::execute_run_interpreter()
+{
 	m_icount -= m_count_before_instruction_step;
 	if(m_icount < 0) {
 		m_count_before_instruction_step = -m_icount;
@@ -177,6 +243,159 @@ void m68000_device::execute_run()
 	if(m_icount < 0) {
 		m_count_before_instruction_step = -m_icount;
 		m_icount = 0;
+	}
+}
+
+
+//**************************************************************************
+//  DRC DISPATCHER (boundary L: 100% cfunc, no native opcode emission)
+//**************************************************************************
+
+inline void m68000_device::alloc_handle(drcuml_state *drcuml, uml::code_handle **handleptr, const char *name)
+{
+	if(*handleptr == nullptr)
+		*handleptr = drcuml->handle_alloc(name);
+}
+
+// The cfunc the entry block calls.  It runs the SAME interpreter microcode loop
+// for the icount budget the scheduler granted -- so the DRC arm is behaviourally
+// identical to the interpreter arm (Leg B holds by construction, cycles included).
+void m68000_device::func_interpret_quantum()
+{
+	execute_run_interpreter();
+}
+
+void m68000_device::cfunc_interpret_quantum(void *param)
+{
+	static_cast<m68000_device *>(param)->func_interpret_quantum();
+}
+
+// The DRC arm of execute_run().  Mirrors ppc_device::execute_run /
+// mips3_device::execute_run for fidelity to the template.  Because the boundary-L
+// entry block ALWAYS runs the full interpreter quantum then exits OUT_OF_CYCLES,
+// the do/while loop runs the entry exactly once; the MISSING_CODE / RESET_CACHE
+// arms are kept (and never taken here) so boundary M can grow real per-opcode
+// compilation without restructuring this loop.
+void m68000_device::execute_run_drc()
+{
+	// reset the cache if dirty
+	if(m_cache_dirty)
+		code_flush_cache();
+	m_cache_dirty = false;
+
+	// execute
+	int execute_result;
+	do {
+		// run as much as we can
+		execute_result = m_drcuml->execute(*m_entry);
+
+		// if we need to recompile, do it (dormant at boundary L: the entry block
+		// never hashjmps to nocode, so MISSING_CODE is never returned)
+		if(execute_result == EXECUTE_MISSING_CODE)
+			code_compile_block(m_pc);
+		else if(execute_result == EXECUTE_UNMAPPED_CODE)
+			fatalerror("Attempted to execute unmapped code at PC=%08X\n", m_pc);
+		else if(execute_result == EXECUTE_RESET_CACHE)
+			code_flush_cache();
+
+	} while(execute_result != EXECUTE_OUT_OF_CYCLES);
+}
+
+
+//-------------------------------------------------
+//  code_flush_cache - flush the cache and
+//  regenerate the static handlers
+//-------------------------------------------------
+
+void m68000_device::code_flush_cache()
+{
+	// empty the transient cache contents
+	m_drcuml->reset();
+
+	try {
+		// generate the entry point, nocode and out-of-cycles handlers
+		static_generate_entry_point();
+	}
+	catch(drcuml_block::abort_compilation &) {
+		fatalerror("Unrecoverable error generating m68000 static DRC code\n");
+	}
+}
+
+
+//-------------------------------------------------
+//  static_generate_entry_point - generate the
+//  entry / nocode / out_of_cycles handlers
+//-------------------------------------------------
+
+void m68000_device::static_generate_entry_point()
+{
+	// forward references
+	alloc_handle(m_drcuml.get(), &m_nocode, "nocode");
+	alloc_handle(m_drcuml.get(), &m_out_of_cycles, "out_of_cycles");
+	alloc_handle(m_drcuml.get(), &m_entry, "entry");
+
+	// --- entry block ---
+	// 100% cfunc: run the interpreter for the granted quantum, then exit
+	// OUT_OF_CYCLES.  No HASHJMP-per-PC dispatch, no register/EA mapping.
+	{
+		drcuml_block &block(m_drcuml->begin_invariant_block(20));
+		UML_HANDLE(block, *m_entry);                                  // handle  entry
+		UML_CALLC(block, &m68000_device::cfunc_interpret_quantum, this); // callc cfunc_interpret_quantum,this
+		UML_EXIT(block, EXECUTE_OUT_OF_CYCLES);                       // exit    EXECUTE_OUT_OF_CYCLES
+		block.end();
+	}
+
+	// --- nocode handler ---
+	// Kept for template completeness; the entry block never jumps here in
+	// boundary L (boundary M's per-opcode HASHJMPs will).
+	{
+		drcuml_block &block(m_drcuml->begin_invariant_block(10));
+		UML_HANDLE(block, *m_nocode);                                 // handle  nocode
+		UML_EXIT(block, EXECUTE_MISSING_CODE);                        // exit    EXECUTE_MISSING_CODE
+		block.end();
+	}
+
+	// --- out-of-cycles handler ---
+	{
+		drcuml_block &block(m_drcuml->begin_invariant_block(10));
+		UML_HANDLE(block, *m_out_of_cycles);                          // handle  out_of_cycles
+		UML_EXIT(block, EXECUTE_OUT_OF_CYCLES);                       // exit    EXECUTE_OUT_OF_CYCLES
+		block.end();
+	}
+}
+
+
+//-------------------------------------------------
+//  code_compile_block - compile a block at pc
+//
+//  Boundary L: effectively dormant -- the entry block exits OUT_OF_CYCLES
+//  without ever hashjmp'ing to nocode, so this is never reached during normal
+//  execution.  It is implemented minimally so the frontend is on a real (if
+//  dormant) path: it describes the block (exercising m68000fe) and emits a
+//  no-op block that exits OUT_OF_CYCLES.  Boundary M replaces this with real
+//  per-opcode UML emission.
+//-------------------------------------------------
+
+void m68000_device::code_compile_block(offs_t pc)
+{
+	// exercise the frontend on the real describe path
+	const opcode_desc *desclist = m_drcfe->describe_code(pc);
+	(void)desclist;
+
+	bool succeeded = false;
+	while(!succeeded) {
+		try {
+			drcuml_block &block(m_drcuml->begin_block(64));
+			// no per-opcode emission at boundary L; just exit so the dispatcher
+			// loop terminates (this never loops because the entry block does not
+			// return MISSING_CODE)
+			UML_EXIT(block, EXECUTE_OUT_OF_CYCLES);                   // exit    EXECUTE_OUT_OF_CYCLES
+			block.end();
+			succeeded = true;
+		}
+		catch(drcuml_block::abort_compilation &) {
+			code_flush_cache();
+		}
 	}
 }
 
@@ -353,6 +572,69 @@ void m68000_device::device_start()
 	state_add(M68K_SP,  "SP", m_da[16]);
 
 	set_icountptr(m_icount);
+
+	// --- DRC (UML recompiler) setup ---
+	// Latch the execution mode from allow_drc() (cpu_device's: OPTION_DRC && not
+	// forced off).  Boundary L scopes the DRC arm to the plain M68000 only, to
+	// minimise blast radius (subclasses that share the base execute_run() inherit
+	// the interpreter arm).
+	m_isdrc = allow_drc() && drc_supported_for_type();
+
+	// Allocate the DRC code cache + UML state ONLY for device types that can use
+	// the DRC arm (drc_supported_for_type()), NOT unconditionally as mips3/ppc do.
+	// The 68000 family is far more widely deployed than mips3/ppc, and several
+	// subtypes derive from m68000_device but never use the DRC arm (m68008/m68008fn
+	// and the m68000mcu variants -- m68010/020/030/040 derive from the Musashi base
+	// and are entirely unaffected).  Allocating an 8 MiB RWX cache + UML state per
+	// such instance would be pure waste, so we gate the allocation on the same
+	// predicate that gates execution.  (drc_supported_for_type() returns true for
+	// plain M68000 and the behaviourally-equivalent oracle test device.)  m_isdrc
+	// itself already requires drc_supported_for_type(), so this never starves a
+	// device that would actually run the DRC arm.
+	if(drc_supported_for_type()) {
+		// allocate the DRC code cache
+		m_drc_cache.allocate_cache(mconfig().options().drc_rwx());
+
+		// initialise the UML generator: single mode, 24 address bits (the 68000's
+		// physical program-space width), 1 ignore bit
+		m_drcuml = std::make_unique<drcuml_state>(*this, m_drc_cache, 0, 1, 24, 1);
+
+		// add symbols so UML logs are legible: PC, icount, SR, and the 17 m_da[]
+		// registers (d0-d7, a0-a6, usp, ssp)
+		m_drcuml->symbol_add(&m_pc, sizeof(m_pc), "pc");
+		m_drcuml->symbol_add(&m_icount, sizeof(m_icount), "icount");
+		m_drcuml->symbol_add(&m_sr, sizeof(m_sr), "sr");
+		for(int regnum = 0; regnum < 8; regnum++) {
+			char buf[8];
+			snprintf(buf, sizeof(buf), "d%d", regnum);
+			m_drcuml->symbol_add(&m_da[regnum], sizeof(m_da[regnum]), buf);
+		}
+		for(int regnum = 0; regnum < 7; regnum++) {
+			char buf[8];
+			snprintf(buf, sizeof(buf), "a%d", regnum);
+			m_drcuml->symbol_add(&m_da[8 + regnum], sizeof(m_da[8 + regnum]), buf);
+		}
+		m_drcuml->symbol_add(&m_da[15], sizeof(m_da[15]), "usp");
+		m_drcuml->symbol_add(&m_da[16], sizeof(m_da[16]), "ssp");
+
+		// initialise the front-end helper
+		m_drcfe = std::make_unique<frontend>(this, COMPILE_BACKWARDS_BYTES, COMPILE_FORWARDS_BYTES, COMPILE_MAX_SEQUENCE);
+
+		// the handles are allocated lazily in code_flush_cache via alloc_handle
+		m_entry = nullptr;
+		m_nocode = nullptr;
+		m_out_of_cycles = nullptr;
+
+		// mark the cache dirty so the static handlers are generated on first execute
+		m_cache_dirty = true;
+	}
+}
+
+
+void m68000_device::device_stop()
+{
+	m_drcfe.reset();
+	m_drcuml.reset();
 }
 
 void m68000_device::state_import(const device_state_entry &entry)

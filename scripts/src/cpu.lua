@@ -13,7 +13,7 @@
 -- Dynamic recompiler objects
 --------------------------------------------------
 
-DRC_CPUS = { "ADSP21062", "DSP16", "DSPP", "E1", "MB86235", "MIPS3", "POWERPC", "SH", "SWP30", "UNSP" }
+DRC_CPUS = { "M680X0", "ADSP21062", "DSP16", "DSPP", "E1", "MB86235", "MIPS3", "POWERPC", "SH", "SWP30", "UNSP" }
 CPU_INCLUDE_DRC = false
 for i, v in ipairs(DRC_CPUS) do
 	if (CPUS[v]~=null) then
@@ -2147,6 +2147,8 @@ if CPUS["M680X0"] then
 		MAME_DIR .. "src/devices/cpu/m68000/m68000-sdp.cpp",
 		MAME_DIR .. "src/devices/cpu/m68000/m68000-sip.cpp",
 		MAME_DIR .. "src/devices/cpu/m68000/m68000-drcdesc.ipp",
+		MAME_DIR .. "src/devices/cpu/m68000/m68000fe.cpp",
+		MAME_DIR .. "src/devices/cpu/m68000/m68000fe.h",
 		MAME_DIR .. "src/devices/cpu/m68000/m68000mcu-head.h",
 		MAME_DIR .. "src/devices/cpu/m68000/m68000mcu-sdfm.cpp",
 		MAME_DIR .. "src/devices/cpu/m68000/m68000mcu-sifm.cpp",
