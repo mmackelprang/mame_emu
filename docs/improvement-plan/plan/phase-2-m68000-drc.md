@@ -1,9 +1,9 @@
 # Phase 2 — m68000 → DRCUML port (Pick 2)
 
-> **Status:** In progress — **PR boundary K shipped** (Tasks 1–2) · **Consumes:** ADR [0002](../adr/0002-m68000-drcuml-port.md)
+> **Status:** In progress — **PR boundary K shipped** (Tasks 1–2) · **boundary L in flight** (Tasks 3–4) · **Consumes:** ADR [0002](../adr/0002-m68000-drcuml-port.md)
 > **Hard gate:** ADR [0001](../adr/0001-differential-cpu-oracle.md) — the m68000 oracle
 > **Spec:** [`../specs/2026-06-24-mame-improvements-design.md`](../specs/2026-06-24-mame-improvements-design.md)
-> **Date:** 2026-06-24 · **Last updated:** 2026-06-26 (boundary K)
+> **Date:** 2026-06-24 · **Last updated:** 2026-06-26 (boundary L claimed)
 
 ## Goal
 
@@ -65,9 +65,13 @@ PR, but `./mame -validate` and the interpreter leg must remain green.)
 - **New `.cpp` files require `make REGENIE=1`** and registration in
   `scripts/src/cpu.lua` (the M680X0 `files {}` block, ~:2116-2143).
 - Match the existing m68000 brace/whitespace style; run `srcclean` on touched files.
-- Iteration build: `make SOURCES=src/devices/cpu/m68000/m68000.cpp` (after `make
-  REGENIE=1` for the new files). No `mame.lst` change (no new device/driver — the existing
-  `m68000_device` gains a path).
+- Iteration build: **build the m68000 core as part of the `mametests` (`TESTS=1`) target**
+  and run the oracle — `make REGENIE=1 && make TESTS=1 && ./mametests "[m68000]"`. Do **not**
+  use `make SOURCES=src/devices/cpu/m68000/m68000.cpp`: `SOURCES` filters by *driver*, and a
+  CPU device has no drivers, so GENie errors. (On Windows/MSYS2 the verified recipe is
+  `MSYSTEM=MINGW64 bash -lc 'export OS=Windows_NT; cd <worktree>; mingw32-make REGENIE=1 &&
+  mingw32-make TESTS=1 -j32'` — the makefile needs both `MSYSTEM=MINGW64` and `OS=Windows_NT`.)
+  No `mame.lst` change (no new device/driver — the existing `m68000_device` gains a path).
 
 ---
 
@@ -112,7 +116,7 @@ PR, but `./mame -validate` and the interpreter leg must remain green.)
 > (`mametests "[m68000]"`) is **green** (317,885 assertions). Cut line captured in
 > `src/devices/cpu/m68000/README-drc.md`. **Boundary L is next.**
 
-### Task 3 — DRC frontend skeleton (`m68000fe.{cpp,h}`) — block walk, no UML emit
+### Task 3 — DRC frontend skeleton (`m68000fe.{cpp,h}`) — block walk, no UML emit 🚀 IN FLIGHT (PR boundary L)
 
 - **Files (new):** `src/devices/cpu/m68000/m68000fe.cpp`, `m68000fe.h`.
 - **Files (edit):** `scripts/src/cpu.lua` (M680X0 `files {}` block ~:2116-2143).
@@ -127,7 +131,7 @@ PR, but `./mame -validate` and the interpreter leg must remain green.)
   the expected opcode boundaries on a small fixture. **The interpreter oracle is untouched
   and stays green** (`./mametests "[m68000]"`). `./mame -validate` green. `srcclean`.
 
-### Task 4 — DRC device state + `execute_run` branch (still interpreting)
+### Task 4 — DRC device state + `execute_run` branch (still interpreting) 🚀 IN FLIGHT (PR boundary L)
 
 - **Files (edit):** `src/devices/cpu/m68000/m68000.cpp` (add the `m_isdrc` top-level branch
   in `execute_run()` at :147; the existing microcode loop becomes the interpreter arm),
@@ -259,7 +263,7 @@ PR, but `./mame -validate` and the interpreter leg must remain green.)
 | PR | Tasks | Theme | Gate |
 |---|---|---|---|
 | K ✅ | 1–2 | Gate check + generator descriptor extension | oracle green (decode unchanged) — **shipped (PR #22, boundary K)** |
-| L | 3–4 | Frontend skeleton + dual-path plumbing (100% `cfunc_`) | dual-leg oracle (full fallback) |
+| L 🚀 | 3–4 | Frontend skeleton + dual-path plumbing (100% `cfunc_`) | dual-leg oracle (full fallback) — **in flight (`feat/m68000-drc-boundary-l`)** |
 | M | 5 | Native UML for the common-path opcode set | dual-leg oracle, cycle-exact |
 | N | 6–7 | Native-coverage assertion + throughput bar | coverage + speedup ≥ bar |
 | (matrix) | 8 | x64 / C / arm64 backends | dual-leg oracle per backend |
