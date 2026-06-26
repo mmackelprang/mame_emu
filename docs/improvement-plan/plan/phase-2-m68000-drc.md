@@ -258,7 +258,7 @@ PR, but `./mame -validate` and the interpreter leg must remain green.)
 
 | PR | Tasks | Theme | Gate |
 |---|---|---|---|
-| K ✅ | 1–2 | Gate check + generator descriptor extension | oracle green (decode unchanged) — **shipped (PR boundary K)** |
+| K ✅ | 1–2 | Gate check + generator descriptor extension | oracle green (decode unchanged) — **shipped (PR #22, boundary K)** |
 | L | 3–4 | Frontend skeleton + dual-path plumbing (100% `cfunc_`) | dual-leg oracle (full fallback) |
 | M | 5 | Native UML for the common-path opcode set | dual-leg oracle, cycle-exact |
 | N | 6–7 | Native-coverage assertion + throughput bar | coverage + speedup ≥ bar |
