@@ -64,12 +64,16 @@ the per-phase task plans (`plan/phase-{1,2,3}-*.md`) from these ADRs.
   `make` (Task 0), produced the m68000 oracle that **Phase 2 hard-gates on**, and wired the
   first CI test gates (`mametests` + `srcclean`, boundary D — neither ran in CI before). The
   CPU oracle is **ratcheted per-CPU** (strict state+cycle equality for the independent
-  z80/m6502 corpora; the MAME-derived m68000 corpus is a Leg-A probe per ADR 0006). Only
-  Phases 2 and 3 remain.
-- **Phase 2** is the first DRC increment: **native UML for a defined common-path opcode
-  set** (not infra-only), an explicit **throughput acceptance bar**, oracle-gated
-  cycle-for-cycle, plain 68000 only, rare/exception opcodes `cfunc_` to the interpreter.
-  It cannot begin until Phase 1's m68000 oracle is green at strict cycle equality.
+  z80/m6502 corpora; the MAME-derived m68000 corpus is a Leg-A probe per ADR 0006).
+- **Phase 2** is **in progress** — the first DRC increment: **native UML for a defined
+  common-path opcode set** (not infra-only), an explicit **throughput acceptance bar**,
+  oracle-gated cycle-for-cycle, plain 68000 only, rare/exception opcodes `cfunc_` to the
+  interpreter. Boundaries **K** (generated DRC decode-descriptor table) and **L** (DRC
+  frontend skeleton + dual-path `execute_run()` with a 100% `cfunc_` dispatcher) are
+  shipped — boundary L **lights up oracle Leg B** (interpreter ≡ DRC, register/flag/RAM/
+  **cycle** exact on the x64 + C UML backends), the cycle-exact gate the remaining DRC
+  boundaries regress against. Native UML emission (boundary M) is next; it was unblocked by
+  Phase 1's m68000 oracle (Leg B) being green.
 - **Phase 3** is **read-write v1**: the `http.cpp:185` body-read fix, a token auth model,
   static-handler traversal hardening, and localhost-default bind are all first-class v1
   tasks. Independent of Phase 2.
