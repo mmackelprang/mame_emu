@@ -56,13 +56,16 @@ the per-phase task plans (`plan/phase-{1,2,3}-*.md`) from these ADRs.
 
 | Plan | Picks / ADRs | Tasks | PR boundaries | Headline gate |
 |---|---|---|---|---|
-| [Phase 1 — Enablers & quick wins](plan/phase-1-enablers-and-quick-wins.md) | 1, 3, 5 ([0001](adr/0001-differential-cpu-oracle.md)/[0003](adr/0003-frontend-usability-quick-wins.md)/[0005](adr/0005-build-and-driverlist-friction.md)) | 25 (incl. Task 0: `pacman -S make`) | A–J | z80+m6502+m68000 oracle; `mametests`+`srcclean` in CI |
+| [Phase 1 — Enablers & quick wins](plan/phase-1-enablers-and-quick-wins.md) ✅ **Complete** | 1, 3, 5 ([0001](adr/0001-differential-cpu-oracle.md)/[0003](adr/0003-frontend-usability-quick-wins.md)/[0005](adr/0005-build-and-driverlist-friction.md)) | 25 (incl. Task 0: `pacman -S make`) | A–J ✅ | z80+m6502+m68000 oracle; `mametests`+`srcclean` in CI |
 | [Phase 2 — m68000 → DRCUML](plan/phase-2-m68000-drc.md) | 2 ([0002](adr/0002-m68000-drcuml-port.md)) | 10 | K–O | m68000 oracle green per **[0006](adr/0006-m68000-oracle-gate-definition.md)** (Leg A + Leg B) + native-coverage + throughput bar |
 | [Phase 3 — Web control surface](plan/phase-3-web-control-surface.md) | 4 ([0004](adr/0004-web-control-surface.md)) | 11 | P–T | read-write `/api/v1` behind localhost+traversal+body-read+auth |
 
-- **Phase 1** starts with installing GNU `make` (Task 0). It produces the m68000 oracle
-  that **Phase 2 hard-gates on**, and wires the first CI test gates. The CPU oracle is
-  **ratcheted per-CPU** (strict state+cycle equality, z80/m6502 first, then m68000).
+- **Phase 1 is complete** (all boundaries A–J merged). It started with installing GNU
+  `make` (Task 0), produced the m68000 oracle that **Phase 2 hard-gates on**, and wired the
+  first CI test gates (`mametests` + `srcclean`, boundary D — neither ran in CI before). The
+  CPU oracle is **ratcheted per-CPU** (strict state+cycle equality for the independent
+  z80/m6502 corpora; the MAME-derived m68000 corpus is a Leg-A probe per ADR 0006). Only
+  Phases 2 and 3 remain.
 - **Phase 2** is the first DRC increment: **native UML for a defined common-path opcode
   set** (not infra-only), an explicit **throughput acceptance bar**, oracle-gated
   cycle-for-cycle, plain 68000 only, rare/exception opcodes `cfunc_` to the interpreter.
@@ -75,7 +78,7 @@ the per-phase task plans (`plan/phase-{1,2,3}-*.md`) from these ADRs.
 
 | ADR | Status | Open questions | Notes |
 |---|---|---|---|
-| 0001 | In progress | 5 | Catch2 harness in `mametests`; SingleStepTests corpus fetched (not vendored) via pinned/hashed manifest; gates `mametests` + `srcclean` in CI. z80 + m6502 legs landed (strict state+cycle). m68000 leg's gate is now **defined by [0006](adr/0006-m68000-oracle-gate-definition.md)** (resolves 0001 OQ #3 for m68000). |
+| 0001 | **Done** | 5 | Catch2 harness in `mametests`; SingleStepTests corpus fetched (not vendored) via pinned/hashed manifest. **All legs shipped** — z80 + m6502 (strict state+cycle), m68000 Leg-A probe per **[0006](adr/0006-m68000-oracle-gate-definition.md)**. **Boundary D landed:** all three CI legs build `TESTS=1`, fetch the corpus, and run `./mametests` (Linux = canonical full-corpus gate incl. full m68000; mac/win run a documented `CPUORACLE_MAX_FILES=64` subset); new `srcclean.yml` gates changed `src/**` files. First time `mametests` + `srcclean` run in CI. |
 | 0002 | Proposed | 5 | Targets the **new microcode core** (`m68000.cpp`), not legacy Musashi. Increment 1 = plain 68000 common path; rest `cfunc_` to interpreter. Oracle-gated. |
 | 0003 | Done | 4 | Pure UX; surfaces already-present data. All copy via the `_()` i18n macro. Golden-output CLI tests. **All three groups shipped** — A (CLI discoverability, T10–T12 / PR boundary E): `clihelp.{cpp,h}` + golden `[cli]` tests. B (actionable ROM/audit errors, T13–T14 / PR boundary F): `romload_messages.{cpp,h}`; missing-ROM error names the system and points at `-verifyroms` / the Audit Media menu, which now logs per-ROM audit detail. C (internal-UI guidance, T15–T18 / PR boundary G): full-selector empty-state box, slot-menu device descriptions + reboot notice, and an explicit set/append input hint. Internal-UI items (C1–C4, B2) require manual UI smoke per the plan. |
 | 0004 | Proposed | 5 | HTTP server is **already frontend-owned** (`machine_manager`) and created before any machine — launcher endpoints just need frontend-scoped registration. Read-only first; localhost-default + traversal hardening required. |

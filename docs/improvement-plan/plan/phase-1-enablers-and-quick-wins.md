@@ -249,30 +249,57 @@ and m6502 (cleanest), then folding in m68000.
 > **PR boundary C** (Tasks 4–5): m6502 + m68000 oracles. The m68000 cycle-adapter is the
 > hand-off artifact Phase 2 depends on — flag it explicitly in the PR description.
 
-### Task 6 — Wire `mametests` into all three CI legs
+### Task 6 — Wire `mametests` into all three CI legs ✅ DONE (PR boundary D)
+
+> **Landed.** All three legs (`ci-linux.yml`, `ci-macos.yml`, `ci-windows.yml`) now set
+> `TESTS: 1` in the build-env block (alongside the existing `TOOLS: 1`), fetch the pinned
+> corpus (`fetch_vectors.py --cores z80,m6502,m68000`), and run `./mametests` — the four
+> legacy Catch2 tests **and** the full oracle (z80 + m6502 + m68000). **The Linux clang/mame
+> leg is the canonical full-corpus gate** (no `CPUORACLE_MAX_FILES` cap → the full m68000
+> corpus, 127 files / 317.5 k cases, per [ADR 0006](../adr/0006-m68000-oracle-gate-definition.md)
+> decision #3). The Linux gcc/tiny leg, macOS, and the slower Windows MSYS2 legs run a
+> **documented representative subset** (`CPUORACLE_MAX_FILES=64` per core) as a cross-platform
+> smoke — this never weakens the canonical gate, and avoids replaying the full corpus twice
+> on Linux per push. CI's fetch source is **codeload.github.com** (mirror 0), with
+> `github.com/.../archive` as the fallback (manifest `mirrors[]`); a fetch failure exits
+> non-zero and **fails the leg loudly** — the oracle is never silently skipped in CI.
 
 - **Files (edit):** `.github/workflows/ci-linux.yml`, `ci-macos.yml`, `ci-windows.yml`.
-- **Change:** After the existing build step, add: `make TESTS=1` (or fold `TESTS=1` into
-  the existing build-env block — `ci-linux.yml` already sets `TOOLS=1`), a fetch step
+- **Change:** Fold `TESTS=1` into the existing build-env block, add a fetch step
   (`python tests/cpuoracle/fetch_vectors.py --cores z80,m6502,m68000`), then `./mametests`.
   This is the **first time `mametests` runs in CI** — it runs the four legacy tests **and**
-  the oracle. (Network policy: the fetcher's mirror fallback from Task 1 covers a restricted
-  runner; document which mirror CI uses.)
-- **Test/Validation:** CI dry-run (or local emulation of the steps) is green on all three
-  OS legs; an intentionally-failing oracle vector turns the leg red.
-  **Green:** all three legs run `mametests` and pass.
+  the oracle. The fetcher's mirror fallback (Task 1) covers a restricted runner.
+- **Prerequisite fix:** `tests/emu/video/rgbutil.cpp` declared its scratch values
+  `volatile s32`; under C++20 the chained assignment expressions trip `-Werror=volatile`
+  on GCC 14.2, breaking a strict `make TESTS=1` build. The `volatile` qualifier was dropped
+  (unnecessary — Catch2's REQUIRE keeps the values live), and a latent bare-expression bug
+  (`(r == expected_r);` → `REQUIRE(...)`) was fixed. Tests-only.
+- **Test/Validation:** Local emulation of the steps is green — `make TESTS=1` builds (with
+  the rgbutil fix), the fetch verifies all 1987 vector files, and `./mametests` passes
+  including the full m68000 corpus. An intentionally-failing oracle vector turns the leg
+  red. **Green:** all three legs run `mametests` and pass.
 
-### Task 7 — Wire `srcclean` into CI (changed-files scope)
+### Task 7 — Wire `srcclean` into CI (changed-files scope) ✅ DONE (PR boundary D)
 
-- **Files (new):** `.github/workflows/srcclean.yml` (or a step in the existing legs).
+> **Landed.** New `.github/workflows/srcclean.yml`: an `ubuntu-latest` job that builds only
+> the `srcclean` tool (generate the Linux gmake project files, then build the single
+> `srcclean` target — minutes, not the multi-hour full build), resolves the PR's changed
+> `src/**` C/Lua/JSON/XML/layout files via `git diff` against the PR base (or push
+> `before`), runs `srcclean -u` over them, and asserts an **empty `git diff`**. srcclean
+> rewrites in place and its exit code only reports I/O failures, so the diff — not the exit
+> code — is the real assertion. Scope is **changed-files-only** (resolved A2) to avoid
+> surfacing pre-existing whitespace debt as a blocking diff.
+
+- **Files (new):** `.github/workflows/srcclean.yml`.
 - **Change:** Build `srcclean` (comes with `TOOLS=1`), run it over the PR's **changed
   `src/**` files only** (resolved scope: changed-files, to avoid a large pre-existing
   whitespace-debt PR), and fail if it would modify a tracked file (assert empty diff).
-- **Test/Validation:** On a branch with a deliberately mis-indented touched file, the gate
-  fails; on a clean branch it passes. **Green:** clean diff → pass, dirty diff → fail.
+- **Test/Validation:** Verified locally both directions — a deliberately mis-indented file
+  is rewritten by `srcclean` (non-empty diff → gate fails); an already-clean LF source is
+  left untouched (empty diff → gate passes). **Green:** clean diff → pass, dirty diff → fail.
 
-> **PR boundary D** (Tasks 6–7): CI wiring. Keep separate from the C++ so a CI-config
-> revert is trivial if a runner misbehaves.
+> **PR boundary D** (Tasks 6–7): CI wiring. Kept separate from the C++ so a CI-config
+> revert is trivial if a runner misbehaves. **With boundary D merged, Phase 1 is complete.**
 
 ### Task 8 — Oracle docs + per-core onboarding note
 

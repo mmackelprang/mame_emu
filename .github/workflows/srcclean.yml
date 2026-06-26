@@ -1,0 +1,104 @@
+name: srcclean (changed files)
+
+# ADR 0001 boundary D / Task 7: run MAME's `srcclean` whitespace/format
+# normaliser over the PR's CHANGED src/** files and FAIL if it would modify a
+# tracked file (assert an empty diff).
+#
+# Scope is deliberately *changed-files-only* (resolved decision A2): running
+# srcclean over the whole tree would surface a large pre-existing whitespace
+# debt as a blocking diff.  This gate only holds the lines a PR actually
+# touches to the project's formatting conventions, so it is adoptable without a
+# tree-wide cleanup first.
+#
+# Mechanism: srcclean rewrites files in place (its exit code only reports I/O
+# failures, NOT "this file needed cleaning"), so the real assertion is a
+# `git diff --exit-code` after running it -- a non-empty diff means a touched
+# file was not srcclean-clean, and the step fails.
+
+on:
+  push:
+    paths:
+    - '.github/workflows/srcclean.yml'
+    - 'src/**'
+  pull_request:
+    paths:
+    - '.github/workflows/srcclean.yml'
+    - 'src/**'
+
+permissions:
+  contents: read
+
+jobs:
+  srcclean:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@main
+      with:
+        # Need history so we can diff the PR/push range to find changed files.
+        fetch-depth: 0
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y libsdl2-dev libfontconfig-dev
+    # Build ONLY the `srcclean` tool, not the whole tree.  TOOLS=1 makes GENie
+    # emit the srcclean project; we generate just the Linux gmake project files
+    # (the Makefile target runs GENie without building anything), then build the
+    # single `srcclean` target from the generated project Makefile.  srcclean
+    # links only utils/expat/ocore/zlib/utf8proc -- no emulation core -- so this
+    # stays in the minutes range instead of the multi-hour full build.
+    - name: Build srcclean
+      run: |
+        set -euo pipefail
+        # Generate the Linux gmake project files (GENie only; no compilation).
+        # PROJECTDIR = build/projects/$(OSD)/$(FULLTARGET); the Linux default OSD
+        # is sdl and the full target is mame.
+        make TOOLS=1 build/projects/sdl/mame/gmake-linux/Makefile
+        # Build just the srcclean target from the generated project Makefile.
+        make -C build/projects/sdl/mame/gmake-linux config=release64 srcclean
+        test -x ./srcclean
+    - name: Resolve changed src/** files
+      id: changed
+      run: |
+        set -euo pipefail
+        # Determine the comparison base: the PR base for pull_request events,
+        # the push "before" SHA otherwise (falling back to HEAD~1).
+        if [ "${{ github.event_name }}" = "pull_request" ]; then
+          base="${{ github.event.pull_request.base.sha }}"
+        else
+          base="${{ github.event.before }}"
+        fi
+        # A first push to a new branch (or a squash) can leave `before` as the
+        # all-zero SHA or an unreachable commit; fall back to the prior commit.
+        if [ -z "$base" ] || [ "$base" = "0000000000000000000000000000000000000000" ] \
+            || ! git cat-file -e "$base^{commit}" 2>/dev/null; then
+          base="$(git rev-parse HEAD~1 2>/dev/null || git rev-parse HEAD)"
+        fi
+        echo "comparing against base: $base"
+        # srcclean handles C/C++/Lua/JSON/XML sources; restrict to those under
+        # src/** that still exist (ignore deletions).  NUL-delimited to be safe
+        # with any odd path, written to a file the next step consumes.
+        git diff --name-only --diff-filter=ACMR -z "$base" -- \
+          'src/***.c' 'src/***.cpp' 'src/***.cc' 'src/***.h' 'src/***.hpp' \
+          'src/***.ipp' 'src/***.inc' 'src/***.lua' 'src/***.json' \
+          'src/***.xml' 'src/***.lay' > changed_src.zlist || true
+        count=$(tr -cd '\0' < changed_src.zlist | wc -c)
+        echo "changed src/** source files: $count"
+        echo "count=$count" >> "$GITHUB_OUTPUT"
+    - name: Run srcclean over changed files and assert no diff
+      if: steps.changed.outputs.count != '0'
+      run: |
+        set -euo pipefail
+        # Force UNIX newlines (-u): the repo stores text with LF, so without
+        # this srcclean's Linux default (already UNIX) stays consistent and a
+        # CRLF artefact can never masquerade as a real finding.
+        xargs -0 -r ./srcclean -u < changed_src.zlist
+        # srcclean rewrote in place; any modification means a touched file was
+        # not clean.  Show the offending diff and fail.
+        if ! git diff --exit-code; then
+          echo "::error::srcclean would modify the file(s) above. Run 'srcclean' on your changed src/** files and commit the result."
+          exit 1
+        fi
+        echo "srcclean: all changed src/** files are clean."
+    - name: No changed src/** files
+      if: steps.changed.outputs.count == '0'
+      run: echo "No changed src/** source files in range; srcclean gate is a no-op."

@@ -33,7 +33,29 @@ no-op. If the cache is absent the oracle tests skip cleanly (so `mametests` stay
 green without the corpus). No network access at test-run time.
 
 Per-core fast-run knob: `CPUORACLE_MAX_FILES=N` caps the number of fixture files
-(local iteration only — the CI gate runs the full corpus).
+(local iteration only — the canonical CI gate runs the full corpus).
+
+## Running in CI (ADR 0001 boundary D)
+
+`mametests` (and therefore this oracle) runs in all three CI legs
+(`.github/workflows/ci-{linux,macos,windows}.yml`): each builds with `TESTS=1`, runs
+`fetch_vectors.py --cores z80,m6502,m68000`, then `./mametests`. A fetch failure exits
+non-zero and **fails the leg loudly** — the "skip if fixtures absent" path above is for a
+developer without the corpus, never for CI.
+
+- **Fetch source.** CI fetches from the manifest `mirrors[]` in order: **primary =
+  `codeload.github.com`**, fallback = `github.com/<repo>/archive`. Both are byte-identical
+  and hash-checked against the pinned sha256.
+- **Per-leg corpus coverage.** **The Linux clang/mame leg is the canonical gate and runs
+  the FULL corpus** (no `CPUORACLE_MAX_FILES` cap) — including the full m68000 corpus (127
+  files / 317.5 k cases) per [ADR 0006](../../docs/improvement-plan/adr/0006-m68000-oracle-gate-definition.md)
+  decision #3. The Linux gcc/tiny leg, **macOS**, and the slower **Windows** MSYS2 legs run
+  a documented representative subset (`CPUORACLE_MAX_FILES=64` per core) as a cross-platform
+  smoke; this never weakens the canonical full-corpus gate (and avoids replaying the full
+  corpus twice on Linux per push).
+- **`srcclean` gate.** A separate `.github/workflows/srcclean.yml` job builds the
+  `srcclean` tool and runs it over the PR's changed `src/**` files, failing on a non-empty
+  diff (changed-files scope, per the resolved A2 decision).
 
 ## Authority asymmetry: independent (z80/m6502) vs MAME-derived (m68000)
 

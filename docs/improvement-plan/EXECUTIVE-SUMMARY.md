@@ -1,11 +1,13 @@
 # MAME Improvement Program — Executive Summary
 
-*Living status document. Last updated: 2026-06-25 · `main` @ `73367282`*
+*Living status document. Last updated: 2026-06-25 · `main` @ `4aab9a94` (+ boundary D)*
 
-> **Headline:** Phase 1 (enablers + quick wins) is ~90% complete. **No runtime
-> emulation speedup has shipped yet** — that is Phase 2 (m68000 DRC), which is
-> designed but not built. What has shipped is the **correctness safety-net, UX, and
-> developer-experience** work that makes the performance work safe to attempt.
+> **Headline:** Phase 1 (enablers + quick wins) is **complete** — all boundaries A–J
+> merged, and boundary D now runs `mametests` (the differential CPU oracle) + `srcclean`
+> in CI for the first time on all three OS legs. **No runtime emulation speedup has
+> shipped yet** — that is Phase 2 (m68000 DRC), which is designed but not built. What has
+> shipped is the **correctness safety-net, UX, and developer-experience** work that makes
+> the performance work safe to attempt. Only Phases 2 and 3 remain.
 
 ## 1. Program at a glance
 
@@ -14,14 +16,16 @@ dependency-ordered phases.
 
 | Phase | Pick / ADR | Theme | Status |
 |---|---|---|---|
-| **P1** | Pick 1 / ADR 0001 — Differential CPU oracle | Correctness safety net | z80 ✅ · m6502 ✅ · m68000 ✅ Leg-A probe ~99.6% state / ~99.3% cycle ([ADR 0006](adr/0006-m68000-oracle-gate-definition.md); Leg B = the Phase-2 gate) · CI-wiring (boundary D) pending |
+| **P1** | Pick 1 / ADR 0001 — Differential CPU oracle | Correctness safety net | **✅ Done** — z80 ✅ · m6502 ✅ · m68000 ✅ Leg-A probe ~99.6% state / ~99.3% cycle ([ADR 0006](adr/0006-m68000-oracle-gate-definition.md); Leg B = the Phase-2 gate) · **CI-wiring (boundary D) merged** (`mametests` + `srcclean` on all 3 legs; Linux runs the full corpus) |
 | **P1** | Pick 3 / ADR 0003 — Front-end usability | End-user UX | **✅ Done** (PRs #3 / #4 / #5) |
 | **P1** | Pick 5 / ADR 0005 — Build/list friction | Developer experience | **✅ Done** (PRs #2 / #6 / #7) |
 | **P2** | Pick 2 / ADR 0002 — m68000 → DRCUML | **Runtime performance** | Designed, **not started** (hard-gated on the m68000 oracle) |
 | **P3** | Pick 4 / ADR 0004 — Web control surface | New capability | Designed, not started |
 
-**12 PRs opened, 9 merged.** The remainder are the held m68000 pieces (#11 infra,
-#12 the gate-definition ADR).
+**Phase 1 fully merged** (boundaries A–J): the fetcher (#1), the z80/m6502/m68000 oracle
+legs (#8/#9/#14), the executive summary (#13), the front-end UX work (#3/#4/#5), the
+build/list friction tooling (#2/#6/#7), and the boundary-D CI wiring (`mametests` +
+`srcclean`) plus its prerequisite rgbutil `-Werror` fix.
 
 ## 2. What shipped — grouped by delivered value
 
@@ -102,12 +106,14 @@ correctness-locked benchmark** (methodology specified in Phase-2 Task 7):
 
 ## 5. Open threads
 
-- **m68000 oracle gate** — [ADR 0006](adr/0006-m68000-oracle-gate-definition.md)
-  accepted; 3 refinement open questions under confirmation, then the Builder close-out
-  (fix the `m_au` PC adapter → 100% Leg-A state → frozen divergence allowlist → Leg-A
-  cycles → wire strict `REQUIRE`s).
-- **Boundary D** — wire `mametests` + `srcclean` into the three CI legs (closes Pick 1).
-  Note: a pre-existing `tests/emu/video/rgbutil.cpp` `-Werror` failure under GCC 14.2
-  needs handling when `mametests` is wired into CI.
-- **m6502 `LAS` fix** — oracle-surfaced core bug, queued.
+- **m68000 oracle gate (Leg A) — closed.** [ADR 0006](adr/0006-m68000-oracle-gate-definition.md)
+  accepted; the Builder close-out landed (the `m_au` PC adapter, the deferred-exception
+  residual, the frozen divergence allowlist, strict `REQUIRE`s). Leg B (interpreter ≡ DRC)
+  is the remaining **Phase-2** gate, not a Phase-1 thread.
+- **Boundary D — closed.** `mametests` + `srcclean` are wired into all three CI legs (Linux
+  runs the full corpus, the canonical gate). The prerequisite
+  `tests/emu/video/rgbutil.cpp` `-Werror=volatile` failure under C++20/GCC 14.2 was fixed.
+  **This closes Pick 1 and completes Phase 1.**
+- **m6502 `LAS` fix** — oracle-surfaced core bug, queued (a Phase-2-adjacent core fix, not a
+  Phase-1 blocker).
 - **ADR 0003 UAT** — internal-UI items (C1–C4, B2) await a manual full-build smoke.
