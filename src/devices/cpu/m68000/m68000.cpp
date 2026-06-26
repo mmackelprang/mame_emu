@@ -577,44 +577,57 @@ void m68000_device::device_start()
 	// Latch the execution mode from allow_drc() (cpu_device's: OPTION_DRC && not
 	// forced off).  Boundary L scopes the DRC arm to the plain M68000 only, to
 	// minimise blast radius (subclasses that share the base execute_run() inherit
-	// the interpreter arm).  The UML state is always allocated regardless -- as
-	// mips3/ppc do -- and only m_isdrc gates which arm runs.
+	// the interpreter arm).
 	m_isdrc = allow_drc() && drc_supported_for_type();
 
-	// allocate the DRC code cache
-	m_drc_cache.allocate_cache(mconfig().options().drc_rwx());
+	// Allocate the DRC code cache + UML state ONLY for device types that can use
+	// the DRC arm (drc_supported_for_type()), NOT unconditionally as mips3/ppc do.
+	// The 68000 family is far more widely deployed than mips3/ppc, and several
+	// subtypes derive from m68000_device but never use the DRC arm (m68008/m68008fn
+	// and the m68000mcu variants -- m68010/020/030/040 derive from the Musashi base
+	// and are entirely unaffected).  Allocating an 8 MiB RWX cache + UML state per
+	// such instance would be pure waste, so we gate the allocation on the same
+	// predicate that gates execution.  (drc_supported_for_type() returns true for
+	// plain M68000 and the behaviourally-equivalent oracle test device.)  m_isdrc
+	// itself already requires drc_supported_for_type(), so this never starves a
+	// device that would actually run the DRC arm.
+	if(drc_supported_for_type()) {
+		// allocate the DRC code cache
+		m_drc_cache.allocate_cache(mconfig().options().drc_rwx());
 
-	// initialise the UML generator: single mode, 32 address bits, 1 ignore bit
-	m_drcuml = std::make_unique<drcuml_state>(*this, m_drc_cache, 0, 1, 32, 1);
+		// initialise the UML generator: single mode, 24 address bits (the 68000's
+		// physical program-space width), 1 ignore bit
+		m_drcuml = std::make_unique<drcuml_state>(*this, m_drc_cache, 0, 1, 24, 1);
 
-	// add symbols so UML logs are legible: PC, icount, SR, and the 17 m_da[]
-	// registers (d0-d7, a0-a6, usp, ssp)
-	m_drcuml->symbol_add(&m_pc, sizeof(m_pc), "pc");
-	m_drcuml->symbol_add(&m_icount, sizeof(m_icount), "icount");
-	m_drcuml->symbol_add(&m_sr, sizeof(m_sr), "sr");
-	for(int regnum = 0; regnum < 8; regnum++) {
-		char buf[8];
-		snprintf(buf, sizeof(buf), "d%d", regnum);
-		m_drcuml->symbol_add(&m_da[regnum], sizeof(m_da[regnum]), buf);
+		// add symbols so UML logs are legible: PC, icount, SR, and the 17 m_da[]
+		// registers (d0-d7, a0-a6, usp, ssp)
+		m_drcuml->symbol_add(&m_pc, sizeof(m_pc), "pc");
+		m_drcuml->symbol_add(&m_icount, sizeof(m_icount), "icount");
+		m_drcuml->symbol_add(&m_sr, sizeof(m_sr), "sr");
+		for(int regnum = 0; regnum < 8; regnum++) {
+			char buf[8];
+			snprintf(buf, sizeof(buf), "d%d", regnum);
+			m_drcuml->symbol_add(&m_da[regnum], sizeof(m_da[regnum]), buf);
+		}
+		for(int regnum = 0; regnum < 7; regnum++) {
+			char buf[8];
+			snprintf(buf, sizeof(buf), "a%d", regnum);
+			m_drcuml->symbol_add(&m_da[8 + regnum], sizeof(m_da[8 + regnum]), buf);
+		}
+		m_drcuml->symbol_add(&m_da[15], sizeof(m_da[15]), "usp");
+		m_drcuml->symbol_add(&m_da[16], sizeof(m_da[16]), "ssp");
+
+		// initialise the front-end helper
+		m_drcfe = std::make_unique<frontend>(this, COMPILE_BACKWARDS_BYTES, COMPILE_FORWARDS_BYTES, COMPILE_MAX_SEQUENCE);
+
+		// the handles are allocated lazily in code_flush_cache via alloc_handle
+		m_entry = nullptr;
+		m_nocode = nullptr;
+		m_out_of_cycles = nullptr;
+
+		// mark the cache dirty so the static handlers are generated on first execute
+		m_cache_dirty = true;
 	}
-	for(int regnum = 0; regnum < 7; regnum++) {
-		char buf[8];
-		snprintf(buf, sizeof(buf), "a%d", regnum);
-		m_drcuml->symbol_add(&m_da[8 + regnum], sizeof(m_da[8 + regnum]), buf);
-	}
-	m_drcuml->symbol_add(&m_da[15], sizeof(m_da[15]), "usp");
-	m_drcuml->symbol_add(&m_da[16], sizeof(m_da[16]), "ssp");
-
-	// initialise the front-end helper
-	m_drcfe = std::make_unique<frontend>(this, COMPILE_BACKWARDS_BYTES, COMPILE_FORWARDS_BYTES, COMPILE_MAX_SEQUENCE);
-
-	// the handles are allocated lazily in code_flush_cache via alloc_handle
-	m_entry = nullptr;
-	m_nocode = nullptr;
-	m_out_of_cycles = nullptr;
-
-	// mark the cache dirty so the static handlers are generated on first execute
-	m_cache_dirty = true;
 }
 
 
