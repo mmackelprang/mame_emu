@@ -55,7 +55,7 @@ jobs:
     - name: Validate
       run: ./mametiny -validate
     - name: Reconcile driver list (check only)
-      run: ./mametiny -listxml | python scripts/build/makedep.py reconcilelist -l src/mame/tiny.lst -
+      run: ./mametiny -listxml | python3 scripts/build/makedep.py reconcilelist -l src/mame/tiny.lst -
 
   # ADR 0001/0006 differential CPU oracle -- the load-bearing correctness gate.
   # Runs on the appserver self-hosted runner. Builds the tiny slice + the
@@ -141,7 +141,7 @@ jobs:
     - name: Validate
       run: ./${{ matrix.executable }} -validate
     - name: Reconcile driver list
-      run: ./${{ matrix.executable }} -listxml | python scripts/build/makedep.py reconcilelist -l src/mame/${{ matrix.subtarget }}.lst -
+      run: ./${{ matrix.executable }} -listxml | python3 scripts/build/makedep.py reconcilelist -l src/mame/${{ matrix.subtarget }}.lst -
     # --- ADR 0001 boundary D: mametests + the differential CPU oracle ---------
     # Fetch the pinned, hash-verified SingleStepTests corpus (z80 + m6502 +
     # m68000) into the gitignored build/cpuoracle/ cache.  The fetcher pins an
@@ -164,7 +164,7 @@ jobs:
         CPUORACLE_MAX_FILES: ${{ matrix.oracle_cap }}
       run: ./mametests
     - name: ORM check
-      run: python scripts/minimaws/minimaws.py load --executable ./${{ matrix.executable }} --softwarepath hash
+      run: python3 scripts/minimaws/minimaws.py load --executable ./${{ matrix.executable }} --softwarepath hash
     - uses: actions/upload-artifact@main
       with:
         name: ${{ matrix.executable }}-linux-${{ matrix.compiler }}-${{ github.sha }}
