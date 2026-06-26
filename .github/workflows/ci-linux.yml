@@ -28,6 +28,26 @@ permissions:
   contents: read
 
 jobs:
+  # --- Canary fallback: try GitHub-hosted, fall back to appserver -----------
+  # This no-op runs on a GitHub-hosted runner. If it runs, GH-hosted is available
+  # and it emits gh_ok=true, so the Linux gates below run on ubuntu-latest. If
+  # GitHub Actions minutes are exhausted the job cannot run, gh_ok is unset, and
+  # the gates fall back to the appserver self-hosted runner (free, never consumes
+  # minutes). continue-on-error keeps the run green on fallback.
+  # KILL-SWITCH: set repo variable CI_FORCE_APPSERVER=true to skip this probe and
+  # force appserver everywhere -- the guaranteed manual override if auto-detection
+  # ever misbehaves (e.g. transient GH saturation). See docs/ci/appserver-runner.md.
+  probe-github:
+    if: ${{ vars.CI_FORCE_APPSERVER != 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    continue-on-error: true
+    outputs:
+      gh_ok: ${{ steps.probe.outputs.gh_ok }}
+    steps:
+    - id: probe
+      run: echo "gh_ok=true" >> "$GITHUB_OUTPUT"
+
   # Fast pre-flight that gates the multi-hour matrix legs (ADR 0005 decision #3).
   # It builds only the tiny slice (SUBTARGET=tiny -> mametiny, ~95 drivers, minutes
   # not hours), then runs -validate and the reconcile CHECK form on tiny.lst, so
@@ -37,10 +57,11 @@ jobs:
   # only after this job passes (see `needs: preflight` below), giving fail-fast
   # feedback before the long legs start.
   preflight:
-    # Runs on the appserver self-hosted runner (GH-hosted Actions minutes are
-    # exhausted). The runner is a repo-scoped myoung34/github-runner container
-    # on appserver (labels below); see docs/ci/appserver-runner.md.
-    runs-on: [self-hosted, linux, x64, appserver]
+    # Canary fallback: GitHub-hosted when available, else the appserver
+    # self-hosted runner. See docs/ci/appserver-runner.md.
+    needs: probe-github
+    if: ${{ !cancelled() }}
+    runs-on: ${{ fromJSON(needs.probe-github.outputs.gh_ok == 'true' && '["ubuntu-latest"]' || '["self-hosted","linux","x64","appserver"]') }}
     steps:
     - uses: actions/checkout@main
       with:
@@ -65,8 +86,12 @@ jobs:
   # matrix -- then runs the FULL corpus with no cap, incl. the m68000 Leg-A probe
   # (z80 ~45M + m6502 ~33M assertions + m68000 127 files / 317.5k cases per
   # ADR 0006 owner decision #3).
+  # Runs ONLY on the appserver fallback path: when GitHub-hosted is active, the
+  # build-linux matrix below already runs the oracle, so this standalone job is
+  # skipped to avoid running the full corpus twice.
   oracle:
-    needs: preflight
+    needs: [probe-github, preflight]
+    if: ${{ !cancelled() && needs.preflight.result == 'success' && needs.probe-github.outputs.gh_ok != 'true' }}
     runs-on: [self-hosted, linux, x64, appserver]
     steps:
     - uses: actions/checkout@main
@@ -87,15 +112,14 @@ jobs:
     - name: Run mametests (full oracle + legacy unit tests, no cap)
       run: ./mametests
 
-  # The heavy cross-compiler full-mame build matrix is the GH-hosted leg. While
-  # GH Actions minutes are exhausted it is gated OFF (dormant); the appserver
-  # `oracle` job above is the active correctness gate. Re-enable by setting the
-  # repo variable RUN_FULL_BUILD=true (Settings -> Secrets and variables ->
-  # Actions -> Variables) -- e.g. when GH credits return, or under the planned
-  # try-GH-then-fallback-to-appserver policy.
+  # The heavy cross-compiler full-mame build matrix is GitHub-hosted only -- it is
+  # about cross-compiler coverage the single appserver box can't replicate, and it
+  # already runs the oracle as part of each leg. It runs ONLY when the GitHub
+  # backend is active (probe-github succeeded); on the appserver fallback path it
+  # is skipped and the standalone `oracle` job above is the correctness gate.
   build-linux:
-    if: ${{ vars.RUN_FULL_BUILD == 'true' }}
-    needs: preflight
+    needs: [probe-github, preflight]
+    if: ${{ !cancelled() && needs.probe-github.outputs.gh_ok == 'true' && needs.preflight.result == 'success' }}
     strategy:
       matrix:
         compiler: [gcc, clang]
@@ -154,7 +178,7 @@ jobs:
     # skipped in CI (the in-harness "skip if fixtures absent" path is for a
     # developer without the corpus, not for CI).
     - name: Fetch CPU oracle vectors
-      run: python tests/cpuoracle/fetch_vectors.py --cores z80,m6502,m68000
+      run: python3 tests/cpuoracle/fetch_vectors.py --cores z80,m6502,m68000
     # The clang/mame leg is the CANONICAL oracle gate: it runs the FULL corpus
     # with no CPUORACLE_MAX_FILES cap (matrix.oracle_cap is empty == all) --
     # including the full m68000 corpus (127 files / 317.5k cases) per ADR 0006

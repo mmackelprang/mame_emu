@@ -9,11 +9,11 @@ mirroring the FamilyWorkspace runner pattern. The runner polls GitHub *outbound*
 
 | Gate | Job | Runner |
 |---|---|---|
-| Tiny build + `-validate` + reconcile (check) | `ci-linux.yml` → `preflight` | **appserver** |
-| Differential CPU oracle (z80 + m6502 + **m68000 full corpus**) + legacy unit tests | `ci-linux.yml` → `oracle` | **appserver** |
-| `srcclean` changed-files gate | `srcclean.yml` → `srcclean` | **appserver** |
-| Full cross-compiler mame build matrix | `ci-linux.yml` → `build-linux` | GH-hosted, **gated OFF** (`if: vars.RUN_FULL_BUILD == 'true'`) |
-| macOS / Windows / docs / translations | their workflows | GH-hosted (dormant until credits / fallback policy) |
+| Tiny build + `-validate` + reconcile (check) | `ci-linux.yml` → `preflight` | GH if available, else **appserver** |
+| Differential CPU oracle (z80 + m6502 + **m68000 full corpus**) + legacy unit tests | `ci-linux.yml` → `oracle` | **appserver** (fallback path only) |
+| `srcclean` changed-files gate | `srcclean.yml` → `srcclean` | GH if available, else **appserver** |
+| Full cross-compiler mame build matrix | `ci-linux.yml` → `build-linux` | GitHub-hosted; runs only when GH backend is active |
+| macOS / Windows / docs / translations | their workflows | GitHub-hosted (run when GH is available) |
 
 The `oracle` job builds only the **tiny slice + the `mametests` Catch2 binary**
 (`SUBTARGET=tiny TESTS=1`) — minutes, not the multi-hour full-mame build — then
@@ -65,8 +65,36 @@ or `gh api repos/mmackelprang/mame_emu/actions/runners`.
 > synced there for parity (a backup of the pre-edit live file is at
 > `/srv/gha-runners/compose.runner.yml.bak-pre-mame-2026-06-26`).
 
-## Re-enabling GH-hosted heavy builds
+## Fallback policy — try GitHub-hosted, fall back to appserver (canary)
 
-Set repo variable `RUN_FULL_BUILD=true` (Settings → Secrets and variables →
-Actions → Variables) to re-activate the `build-linux` matrix. This is the seam
-for the planned **try-GH-then-fallback-to-appserver** policy.
+Each Linux workflow starts with a tiny **`probe-github`** job on `ubuntu-latest`.
+If GitHub-hosted is available the probe runs and emits `gh_ok=true`, so the Linux
+gates run on GitHub (`ubuntu-latest`) and the heavy `build-linux` matrix +
+macOS/Windows legs run too. If GitHub Actions minutes are exhausted the probe
+cannot run, `gh_ok` is unset, and the gates **fall back to the appserver runner**
+(free; never consumes minutes). `continue-on-error` keeps the run green on
+fallback. When on appserver the standalone `oracle` job is the correctness gate
+(the `build-linux` matrix is skipped — the single box can't replicate the
+cross-compiler matrix, and it would otherwise run the oracle twice).
+
+### Kill-switch / manual override
+Set repo variable **`CI_FORCE_APPSERVER=true`** to skip the probe and force every
+gate onto appserver — the guaranteed escape hatch. Use it when you *know* GH is
+out (avoids each run's probe attempt and any heavy GH matrix), or if the
+auto-detection ever misbehaves (e.g. transient GH saturation, where GitHub queues
+rather than fails — `timeout-minutes` does not tick while a job is queued).
+
+```sh
+gh variable set CI_FORCE_APPSERVER --body true    # force appserver
+gh variable delete CI_FORCE_APPSERVER             # re-enable the auto-canary
+```
+
+### Verification status (honest)
+The **forced-appserver** path (kill-switch on) and the **GitHub-available** path
+(probe ✓ → `ubuntu-latest`) are deterministically verifiable. The **quota-out
+auto-detect** path only exercises when the account is actually out of minutes and
+relies on GitHub running the self-hosted gates while failing the hosted probe in
+the same run — *probably* fine but unverified here; the kill-switch bounds the
+risk (one variable forces appserver). If quota-aware auto becomes worth the
+robustness, a scheduled job reading the billing API (needs a `user`-scoped token)
+replaces the probe cleanly.

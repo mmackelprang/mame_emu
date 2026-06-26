@@ -31,10 +31,25 @@ permissions:
   contents: read
 
 jobs:
+  # Canary fallback probe (see docs/ci/appserver-runner.md). If GitHub-hosted is
+  # available it emits gh_ok=true; otherwise srcclean falls back to appserver.
+  # Kill-switch: repo variable CI_FORCE_APPSERVER=true forces appserver.
+  probe-github:
+    if: ${{ vars.CI_FORCE_APPSERVER != 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    continue-on-error: true
+    outputs:
+      gh_ok: ${{ steps.probe.outputs.gh_ok }}
+    steps:
+    - id: probe
+      run: echo "gh_ok=true" >> "$GITHUB_OUTPUT"
+
   srcclean:
-    # appserver self-hosted runner (GH-hosted Actions minutes exhausted);
-    # see docs/ci/appserver-runner.md.
-    runs-on: [self-hosted, linux, x64, appserver]
+    # Canary fallback: GitHub-hosted when available, else appserver.
+    needs: probe-github
+    if: ${{ !cancelled() }}
+    runs-on: ${{ fromJSON(needs.probe-github.outputs.gh_ok == 'true' && '["ubuntu-latest"]' || '["self-hosted","linux","x64","appserver"]') }}
     steps:
     - uses: actions/checkout@main
       with:
