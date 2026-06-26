@@ -46,13 +46,19 @@ jobs:
     # single `srcclean` target from the generated project Makefile.  srcclean
     # links only utils/expat/ocore/zlib/utf8proc -- no emulation core -- so this
     # stays in the minutes range instead of the multi-hour full build.
+    #
+    # USE_QTDEBUG=0 is required: on Linux GENie defaults USE_QTDEBUG=1 (the SDL
+    # OSD's Qt debugger), which makes GENie shell out to `qmake6 -query` at
+    # generate time and HARD-FAIL if moc/qmake6 is absent.  srcclean does not
+    # link the OSD debugger, so disabling the Qt debugger removes that toolchain
+    # dependency (no qt6 install needed) without affecting the srcclean binary.
     - name: Build srcclean
       run: |
         set -euo pipefail
         # Generate the Linux gmake project files (GENie only; no compilation).
         # PROJECTDIR = build/projects/$(OSD)/$(FULLTARGET); the Linux default OSD
         # is sdl and the full target is mame.
-        make TOOLS=1 build/projects/sdl/mame/gmake-linux/Makefile
+        make TOOLS=1 USE_QTDEBUG=0 build/projects/sdl/mame/gmake-linux/Makefile
         # Build just the srcclean target from the generated project Makefile.
         make -C build/projects/sdl/mame/gmake-linux config=release64 srcclean
         test -x ./srcclean
