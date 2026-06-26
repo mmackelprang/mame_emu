@@ -7,9 +7,21 @@
 
 #include "m68kcommon.h"
 
+#include "cpu/drcuml.h"
+#include "cpu/drccache.h"
+
+namespace uml {
+	class code_handle;
+}
+
 class m68000_device : public m68000_base_device
 {
 public:
+	// DRC frontend nested classes (defined in m68000fe.h)
+	class frontend;
+	class opcode_desc;
+	friend class frontend;
+
 	struct mmu {
 		virtual u16 read_program(offs_t addr, u16 mem_mask) = 0;
 		virtual void write_program(offs_t addr, u16 data, u16 mem_mask) = 0;
@@ -22,6 +34,7 @@ public:
 	};
 
 	m68000_device(const machine_config &mconfig, const char *tag, device_t *owner, u32 clock);
+	virtual ~m68000_device() override;
 
 	// Device user interface
 	void trigger_bus_error();
@@ -44,6 +57,7 @@ public:
 	virtual space_config_vector memory_space_config() const override;
 	virtual space_config_vector memory_logical_space_config() const override;
 	virtual void device_start() override ATTR_COLD;
+	virtual void device_stop() override ATTR_COLD;
 	virtual void device_reset() override ATTR_COLD;
 	virtual bool memory_translate(int spacenum, int intention, offs_t &address, address_space *&target_space) override;
 
@@ -130,6 +144,12 @@ protected:
 	static const decode_entry s_packed_decode_table[];
 	std::vector<u16> m_decode_table;
 
+	// Generated DRC decode-descriptor table (defines drc_size/drc_ea/drc_reg/
+	// drc_flow, struct drc_desc, and s_drc_desc_table[]).  Included inside the
+	// class scope so the DRC frontend reuses the interpreter's decode truth
+	// rather than re-deriving decode.
+#include "m68000-drcdesc.ipp"
+
 	// Opcode handlers (d = direct, i = indirect, f = full, p = partial)
 	using handler = void (m68000_device::*)();
 
@@ -195,8 +215,44 @@ protected:
 	u32 m_post_run;
 	int m_post_run_cycles;
 
+	// --- DRC (UML recompiler) state ---
+	// Boundary L wires the dual-path execute_run() and a 100%-cfunc dispatcher:
+	// the compiled entry block does nothing but call a C function that runs the
+	// interpreter for the granted quantum, then exits OUT_OF_CYCLES.  No native
+	// opcode emission, no register/EA mapping -- that is boundary M's concern.
+	static constexpr size_t DRC_CACHE_SIZE = 8 * 1024 * 1024;
+
+	drc_cache                  m_drc_cache;     // pointer to the DRC code cache
+	std::unique_ptr<drcuml_state> m_drcuml;     // DRC UML generator state
+	std::unique_ptr<frontend>  m_drcfe;         // pointer to the DRC front-end
+	uml::code_handle          *m_entry;         // entry point
+	uml::code_handle          *m_nocode;        // nocode handler
+	uml::code_handle          *m_out_of_cycles; // out of cycles exception handler
+	u32                        m_drcoptions;    // configurable DRC options
+	bool                       m_cache_dirty;   // true if we need to flush the cache
+	bool                       m_isdrc;         // true if we're in DRC mode (latched from allow_drc())
+
 	// Typed constructor
 	m68000_device(const machine_config &mconfig, device_type type, const char *tag, device_t *owner, u32 clock);
+
+	// DRC plumbing
+	void execute_run_interpreter();             // the byte-unchanged microcode loop (interpreter arm + cfunc body)
+	void execute_run_drc();                     // the DRC arm: cache-flush + entry-block execute loop
+	void code_flush_cache();                    // flush the cache and regenerate the static handlers
+	void code_compile_block(offs_t pc);         // compile a block (dormant at boundary L; exercises the frontend)
+	void static_generate_entry_point();         // generate the entry / nocode / out_of_cycles handlers
+	void func_interpret_quantum();              // run the interpreter for the granted quantum (the cfunc body)
+	static void cfunc_interpret_quantum(void *param);
+
+	// True iff this exact device type should use the DRC arm.  Boundary L scopes
+	// the DRC to the plain M68000 only (minimal blast radius); subclasses that
+	// share the base execute_run() inherit the interpreter arm.  An oracle/test
+	// subclass that is behaviourally a plain 68000 may override this to opt in.
+	// (Defined out-of-line in m68000.cpp, where the M68000 device type is in scope.)
+	virtual bool drc_supported_for_type() const;
+
+	// allocate a UML code handle if not already allocated
+	static inline void alloc_handle(drcuml_state *drcuml, uml::code_handle **handleptr, const char *name);
 
 	// Create the decode table
 	void init_decode_table();
