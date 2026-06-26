@@ -13,6 +13,17 @@
 import sys
 from enum import IntEnum, auto
 
+# Python 3.11 changed IntEnum.__str__ to return the bare integer value
+# (e.g. "1") instead of the symbolic "ClassName.member" form that earlier
+# versions produced.  The committed generated files were emitted with the
+# pre-3.11 form in their debug comments, so reproduce it explicitly here to
+# keep regeneration byte-identical across Python versions.  This affects only
+# comment text in the generated sources, never emitted code.
+def enum_str(value):
+    if isinstance(value, IntEnum):
+        return "%s.%s" % (type(value).__name__, value.name)
+    return "%s" % (value,)
+
 microcode_base_table = [
     [ 0x000, 0x3f0, [ 0x12160, 0x10800, 0x052d0, 0x07cc0, 0x0800c, 0x0800c, 0x08480, 0x118e0, 0x08880, 0x10080, 0x10080, 0x08880, 0x01480, 0x10100, 0x10100, 0x0d300 ] ],
     [ 0x020, 0x3f0, [ 0x00004, 0x01580, 0x07060, 0x04a4a, 0x0000c, 0x161a1, 0x0000c, 0x01d00, 0x06940, 0x046a0, 0x00480, 0x10c02, 0x07d80, 0x008e0, 0x05ea0, 0x12702 ] ],
@@ -1703,9 +1714,9 @@ def generate_base_code_for_microcode(ir, irmask, madr, tvn, group01):
                                   'r' if alu_info & ALUInfo.is_rox_and else '.',
                                   'i' if alu_info & ALUInfo.init else '.',
                                   'f' if alu_info & ALUInfo.finish else '.',
-                                  alu_op,
-                                  "alub" if alu_actrl else "%s:%s" % (abd, regname[abd]) if abd != None else "none",
-                                  ("%s:%s" % (dbd, regname[dbd]) if dbd != None else "none") if alu_dctrl == 0 else "0" if alu_dctrl == 2 else "-1" if alu_dctrl == 3 else "?")])
+                                  enum_str(alu_op),
+                                  "alub" if alu_actrl else "%s:%s" % (enum_str(abd), regname[abd]) if abd != None else "none",
+                                  ("%s:%s" % (enum_str(dbd), regname[dbd]) if dbd != None else "none") if alu_dctrl == 0 else "0" if alu_dctrl == 2 else "-1" if alu_dctrl == 3 else "?")])
         if (alu_actrl or abd != None or alu_op == ALU.over) and alu_single_param[alu_op]:
             code_to_sort.append(["alu", alu_op, alu_mask, alu_info, (abd if abd else ["c", 0]) if alu_op == ALU.over else R.alub if alu_actrl else abd])            
         elif (alu_actrl or abd != None) and (alu_dctrl == 2 or alu_dctrl == 3 or (alu_dctrl == 0 and dbd != None)):
@@ -1996,6 +2007,559 @@ def handler_name_for_instruction(ii):
     if ii[2][2] != '-':
         name += '_' + ii[2][2]
     return name
+
+
+# DRC decode-descriptor generation
+#
+# The 'drcdesc' sub-command emits a generated, self-contained C++ .ipp table
+# that the DRC frontend (a later PR) will consume so it reuses the
+# interpreter's decode truth (the m68000.lst mnemonic + operand columns)
+# instead of re-deriving instruction decode.  Everything below is derived
+# purely from the textual mnemonic + operand tokens of each instruction; the
+# microcode tables are deliberately not consulted here.
+
+# Operand EA / addressing-mode classification.  These mirror the standard
+# 68000 effective-address mode taxonomy as expressed by the .lst tokens.
+DRC_EA_NONE   = 0   # no operand / not an EA (e.g. register list, ccr, sr...)
+DRC_EA_DREG   = 1   # Dn                     ds dd
+DRC_EA_AREG   = 2   # An                     as ad
+DRC_EA_AIND   = 3   # (An)                   ais aid
+DRC_EA_AINC   = 4   # (An)+                  aips aipd
+DRC_EA_ADEC   = 5   # -(An)                  pais paid
+DRC_EA_DISP   = 6   # (d16,An)               das dad daid dad/daid
+DRC_EA_INDX   = 7   # (d8,An,Xn)             dais daid(brief)
+DRC_EA_ABSW   = 8   # (xxx).W                adr16
+DRC_EA_ABSL   = 9   # (xxx).L                adr32
+DRC_EA_PCDIS  = 10  # (d16,PC)              dpc
+DRC_EA_PCIDX  = 11  # (d8,PC,Xn)            dpci
+DRC_EA_IMM    = 12  # immediate             imm imm3 imm4 imm8 imm8o imm12 imm16 imm32 i16u
+DRC_EA_DISPL  = 13  # branch displacement   rel8 rel16
+DRC_EA_REGL   = 14  # movem register list   list listp
+DRC_EA_CCR    = 15  # condition code reg    ccr
+DRC_EA_SR     = 16  # status register       sr
+DRC_EA_USP    = 17  # user stack pointer    usp
+
+# Mapping from each operand token to its EA mode.
+drc_ea_mode = {
+    '-':     DRC_EA_NONE,
+    'ds':    DRC_EA_DREG,  'dd':    DRC_EA_DREG,
+    'as':    DRC_EA_AREG,  'ad':    DRC_EA_AREG,
+    'ais':   DRC_EA_AIND,  'aid':   DRC_EA_AIND,
+    'aips':  DRC_EA_AINC,  'aipd':  DRC_EA_AINC,
+    'pais':  DRC_EA_ADEC,  'paid':  DRC_EA_ADEC,
+    'das':   DRC_EA_DISP,  'dad':   DRC_EA_DISP,  'daid':  DRC_EA_DISP,
+    'dais':  DRC_EA_INDX,
+    'adr16': DRC_EA_ABSW,
+    'adr32': DRC_EA_ABSL,
+    'dpc':   DRC_EA_PCDIS,
+    'dpci':  DRC_EA_PCIDX,
+    'imm':   DRC_EA_IMM,   'imm3':  DRC_EA_IMM,  'imm4':  DRC_EA_IMM,
+    'imm8':  DRC_EA_IMM,   'imm8o': DRC_EA_IMM,  'imm12': DRC_EA_IMM,
+    'imm16': DRC_EA_IMM,   'imm32': DRC_EA_IMM,  'i16u':  DRC_EA_IMM,
+    'rel8':  DRC_EA_DISPL, 'rel16': DRC_EA_DISPL,
+    'list':  DRC_EA_REGL,  'listp': DRC_EA_REGL,
+    'ccr':   DRC_EA_CCR,
+    'sr':    DRC_EA_SR,
+    'usp':   DRC_EA_USP,
+}
+
+# Human-readable EA mode names, used to emit the symbolic C++ constants.
+drc_ea_name = {
+    DRC_EA_NONE:  "DRC_EA_NONE",  DRC_EA_DREG:  "DRC_EA_DREG",
+    DRC_EA_AREG:  "DRC_EA_AREG",  DRC_EA_AIND:  "DRC_EA_AIND",
+    DRC_EA_AINC:  "DRC_EA_AINC",  DRC_EA_ADEC:  "DRC_EA_ADEC",
+    DRC_EA_DISP:  "DRC_EA_DISP",  DRC_EA_INDX:  "DRC_EA_INDX",
+    DRC_EA_ABSW:  "DRC_EA_ABSW",  DRC_EA_ABSL:  "DRC_EA_ABSL",
+    DRC_EA_PCDIS: "DRC_EA_PCDIS", DRC_EA_PCIDX: "DRC_EA_PCIDX",
+    DRC_EA_IMM:   "DRC_EA_IMM",   DRC_EA_DISPL: "DRC_EA_DISPL",
+    DRC_EA_REGL:  "DRC_EA_REGL",  DRC_EA_CCR:   "DRC_EA_CCR",
+    DRC_EA_SR:    "DRC_EA_SR",    DRC_EA_USP:   "DRC_EA_USP",
+}
+
+# Operand size.
+DRC_SIZE_NONE    = 0   # no data size (branches, flow ops)
+DRC_SIZE_B       = 1
+DRC_SIZE_W       = 2
+DRC_SIZE_L       = 3
+DRC_SIZE_UNSIZED = 4   # genuinely indeterminate
+
+drc_size_name = {
+    DRC_SIZE_NONE:    "DRC_SIZE_NONE",
+    DRC_SIZE_B:       "DRC_SIZE_B",
+    DRC_SIZE_W:       "DRC_SIZE_W",
+    DRC_SIZE_L:       "DRC_SIZE_L",
+    DRC_SIZE_UNSIZED: "DRC_SIZE_UNSIZED",
+}
+
+# Register read/write category bits.  These describe *categories* of register
+# access, not specific register numbers (the concrete Dn/An index lives in the
+# opcode bits at run time).
+DRC_REG_DN  = 0x0001   # a data register
+DRC_REG_AN  = 0x0002   # an address register
+DRC_REG_CCR = 0x0004   # condition codes
+DRC_REG_SR  = 0x0008   # full status register (supervisor state)
+DRC_REG_USP = 0x0010   # user stack pointer
+DRC_REG_PC  = 0x0020   # program counter
+DRC_REG_SP  = 0x0040   # active stack pointer (A7)
+
+# Flow flags.
+DRC_FLOW_BRANCH      = 0x01   # transfers control (bra/bsr/Bcc/dbcc/jmp/jsr)
+DRC_FLOW_CONDITIONAL = 0x02   # condition-dependent (Bcc/dbcc/Scc)
+DRC_FLOW_UNCONDITION = 0x04   # always taken (bra/jmp/rts/rte/rtr)
+DRC_FLOW_ENDS_BLOCK  = 0x08   # terminates a basic block for the frontend
+DRC_FLOW_RETURN      = 0x10   # subroutine/exception return (rts/rte/rtr)
+
+# EA modes that read memory (and therefore can address-error in user mode).
+DRC_EA_MEM = frozenset([
+    DRC_EA_AIND, DRC_EA_AINC, DRC_EA_ADEC, DRC_EA_DISP, DRC_EA_INDX,
+    DRC_EA_ABSW, DRC_EA_ABSL, DRC_EA_PCDIS, DRC_EA_PCIDX,
+])
+
+# EA modes that read An as part of forming the address.
+DRC_EA_READS_AN = frozenset([
+    DRC_EA_AIND, DRC_EA_AINC, DRC_EA_ADEC, DRC_EA_DISP, DRC_EA_INDX,
+])
+
+# EA modes that write An back (auto-inc / auto-dec update the pointer).
+DRC_EA_WRITES_AN = frozenset([DRC_EA_AINC, DRC_EA_ADEC])
+
+# Conditional-branch / set / decrement-branch mnemonic prefixes.  beq/bne/...,
+# dbcc/dbeq/..., scc/seq/... are individually named in the .lst.
+DRC_BCC = frozenset([
+    'bcc', 'bcs', 'beq', 'bge', 'bgt', 'bhi', 'ble', 'bls', 'blt',
+    'bmi', 'bne', 'bpl', 'bvc', 'bvs',
+])
+DRC_DBCC = frozenset([
+    'dbcc', 'dbcs', 'dbeq', 'dbge', 'dbgt', 'dbhi', 'dble', 'dbls', 'dblt',
+    'dbmi', 'dbne', 'dbpl', 'dbvc', 'dbvs', 'dbt', 'dbra',
+])
+DRC_SCC = frozenset([
+    'scc', 'scs', 'seq', 'sge', 'sgt', 'shi', 'sle', 'sls', 'slt',
+    'smi', 'sne', 'spl', 'svc', 'svs', 'st', 'sf',
+])
+
+# Mnemonics (size-suffix stripped) whose own opcode action can fault, trap, or
+# is privileged / bus-timing subtle regardless of addressing mode.  The DRC
+# will route these through cfunc_ handlers.
+DRC_HARD_CFUNC = frozenset([
+    # privileged / supervisor-state changers
+    'reset', 'stop', 'rte', 'move',  # move sr/usp variants are filtered below
+    'andi', 'ori', 'eori',           # ...,sr variants are privileged
+    # explicit traps / exception generators
+    'trap', 'trapv', 'chk', 'illegal', 'linea', 'linef',
+    # division (zero-divide trap) and read-modify-write bus op
+    'divs', 'divu', 'tas',
+    # returns restore status / pc from the stack
+    'rtr', 'rts',
+])
+
+
+def drc_base_mnemonic(mnem):
+    # Strip a trailing .b/.w/.l size suffix, leaving the bare mnemonic.
+    if len(mnem) > 2 and mnem[-2] == '.' and mnem[-1] in 'bwl':
+        return mnem[:-2]
+    return mnem
+
+
+def drc_size_for(ii):
+    mnem = ii[2][0]
+    if len(mnem) > 2 and mnem[-2] == '.':
+        suf = mnem[-1]
+        if suf == 'b':
+            return DRC_SIZE_B
+        if suf == 'w':
+            return DRC_SIZE_W
+        if suf == 'l':
+            return DRC_SIZE_L
+    base = mnem
+    dst_ea = drc_ea_mode[ii[2][2]]
+    src_ea = drc_ea_mode[ii[2][1]]
+    # Bit ops: a Dn destination is operated on as a long; a memory
+    # destination is operated on as a byte (68000 fixed behaviour).
+    if base in ('btst', 'bchg', 'bclr', 'bset'):
+        return DRC_SIZE_L if dst_ea == DRC_EA_DREG else DRC_SIZE_B
+    # BCD ops are always byte-sized.
+    if base in ('abcd', 'sbcd'):
+        return DRC_SIZE_B
+    # Single-bit memory shift/rotate forms (no register operand pair) are
+    # always word-sized; the register forms carry an explicit .b/.w/.l above.
+    if base in ('asl', 'asr', 'lsl', 'lsr', 'rol', 'ror', 'roxl', 'roxr'):
+        return DRC_SIZE_W
+    # 68000 ISA fixes the size for these even without a textual suffix.
+    if base == 'moveq':
+        return DRC_SIZE_L
+    if base in ('lea', 'pea'):
+        return DRC_SIZE_L          # address-sized result
+    if base in ('exg',):
+        return DRC_SIZE_L          # always 32-bit
+    if base in ('link', 'unlk'):
+        return DRC_SIZE_L          # operates on 32-bit An/SP
+    if base in DRC_SCC:
+        return DRC_SIZE_B          # Scc writes a byte
+    if base == 'tas':
+        return DRC_SIZE_B          # test-and-set is byte-sized
+    if base in ('andi', 'ori', 'eori'):
+        return DRC_SIZE_W          # the unsuffixed forms target ccr/sr (word)
+    if base == 'move':
+        return DRC_SIZE_W          # the unsuffixed forms are move-to/from sr/ccr/usp (word)
+    if base == 'stop':
+        return DRC_SIZE_W          # 16-bit immediate -> sr
+    # Flow / control with no data size.
+    if base in ('bra', 'bsr') or base in DRC_BCC or base in DRC_DBCC:
+        return DRC_SIZE_NONE
+    if base in ('jmp', 'jsr', 'rts', 'rte', 'rtr', 'nop', 'reset', 'trap',
+                'trapv', 'illegal', 'linea', 'linef', 'swap'):
+        if base == 'swap':
+            return DRC_SIZE_W       # swap is word-halves of a long; treat as word
+        return DRC_SIZE_NONE
+    return DRC_SIZE_UNSIZED
+
+
+def drc_reg_sets(ii):
+    # Compute (read_set, write_set) register category bitmasks for one
+    # instruction from its mnemonic + the two operand tokens.
+    mnem = ii[2][0]
+    base = drc_base_mnemonic(mnem)
+    src = ii[2][1]
+    dst = ii[2][2]
+    src_ea = drc_ea_mode[src]
+    dst_ea = drc_ea_mode[dst]
+    rd = 0
+    wr = 0
+
+    def reads_ea(ea):
+        bits = 0
+        if ea == DRC_EA_DREG:
+            bits |= DRC_REG_DN
+        elif ea == DRC_EA_AREG:
+            bits |= DRC_REG_AN
+        elif ea in DRC_EA_READS_AN:
+            bits |= DRC_REG_AN
+        elif ea in (DRC_EA_PCDIS, DRC_EA_PCIDX):
+            bits |= DRC_REG_PC
+        elif ea == DRC_EA_CCR:
+            bits |= DRC_REG_CCR
+        elif ea == DRC_EA_SR:
+            bits |= DRC_REG_SR
+        elif ea == DRC_EA_USP:
+            bits |= DRC_REG_USP
+        # index modes also read a Dn/An index register
+        if ea in (DRC_EA_INDX, DRC_EA_PCIDX):
+            bits |= DRC_REG_DN | DRC_REG_AN
+        return bits
+
+    # The source operand is read.
+    rd |= reads_ea(src_ea)
+    # Auto-inc/dec source updates its An.
+    if src_ea in DRC_EA_WRITES_AN:
+        rd |= DRC_REG_AN
+        wr |= DRC_REG_AN
+
+    # The destination operand is written; computing its address also reads An.
+    if dst_ea == DRC_EA_DREG:
+        wr |= DRC_REG_DN
+    elif dst_ea == DRC_EA_AREG:
+        wr |= DRC_REG_AN
+    elif dst_ea in DRC_EA_READS_AN:
+        rd |= DRC_REG_AN
+        if dst_ea in DRC_EA_WRITES_AN:
+            wr |= DRC_REG_AN
+    elif dst_ea in (DRC_EA_PCDIS, DRC_EA_PCIDX):
+        rd |= DRC_REG_PC
+    elif dst_ea == DRC_EA_CCR:
+        wr |= DRC_REG_CCR
+    elif dst_ea == DRC_EA_SR:
+        wr |= DRC_REG_SR
+    elif dst_ea == DRC_EA_USP:
+        wr |= DRC_REG_USP
+    if dst_ea in (DRC_EA_INDX, DRC_EA_PCIDX):
+        rd |= DRC_REG_DN | DRC_REG_AN
+
+    # Most ALU/data ops also read-modify the destination, so a destination
+    # data/addr register is read as well as written.
+    rmw_dst = base not in (
+        'move', 'movea', 'moveq', 'lea', 'clr', 'st', 'sf', 'movem', 'movep',
+    ) and base not in DRC_SCC
+    if rmw_dst:
+        if dst_ea == DRC_EA_DREG:
+            rd |= DRC_REG_DN
+        elif dst_ea == DRC_EA_AREG:
+            rd |= DRC_REG_AN
+
+    # Condition codes: nearly all data ops update the CCR.  Be inclusive but
+    # explicit about the families that do not.
+    no_ccr = base in (
+        'move',  # move-to/from sr/usp/ccr handled via EA; plain move sets ccr
+        'lea', 'pea', 'jmp', 'jsr', 'bra', 'bsr', 'nop', 'reset', 'stop',
+        'swap',  # actually sets ccr, but kept simple below
+        'movem', 'movep', 'exg', 'link', 'unlk', 'illegal', 'linea', 'linef',
+        'trap', 'trapv', 'rts',
+    )
+    sets_ccr = not no_ccr
+    # Re-add the families inside no_ccr that genuinely set CCR.
+    if base in ('move', 'swap', 'tst', 'tas', 'moveq'):
+        sets_ccr = True
+    # movea / plain register moves to An do not set CCR.
+    if base == 'movea' or dst_ea == DRC_EA_AREG and base in ('move',):
+        sets_ccr = False
+    # adda/suba/cmpa to An: adda/suba do not set ccr; cmpa does.
+    if base in ('adda', 'suba'):
+        sets_ccr = False
+    if base in ('addq', 'subq') and dst_ea == DRC_EA_AREG:
+        sets_ccr = False
+    # X-using ops read the X flag from CCR as well as writing it.
+    if base in ('addx', 'subx', 'abcd', 'sbcd', 'nbcd', 'negx', 'roxl', 'roxr'):
+        rd |= DRC_REG_CCR
+    # Conditional ops read the condition codes.
+    if base in DRC_BCC or base in DRC_DBCC or base in DRC_SCC:
+        rd |= DRC_REG_CCR
+    if sets_ccr:
+        wr |= DRC_REG_CCR
+
+    # Stack-touching control ops use the active stack pointer (A7).
+    if base in ('bsr', 'jsr', 'rts', 'rte', 'rtr', 'link', 'unlk', 'pea',
+                'trap', 'trapv', 'chk', 'illegal', 'linea', 'linef'):
+        rd |= DRC_REG_SP
+        wr |= DRC_REG_SP
+    # All control transfers read/update the PC.
+    if base in ('bra', 'bsr', 'jmp', 'jsr', 'rts', 'rte', 'rtr') \
+            or base in DRC_BCC or base in DRC_DBCC:
+        rd |= DRC_REG_PC
+        wr |= DRC_REG_PC
+    # rte/rtr restore the (whole or partial) status register from the stack.
+    if base == 'rte':
+        wr |= DRC_REG_SR
+    if base == 'rtr':
+        wr |= DRC_REG_CCR
+    # dbcc decrements its Dn counter.
+    if base in DRC_DBCC:
+        rd |= DRC_REG_DN
+        wr |= DRC_REG_DN
+
+    return rd, wr
+
+
+def drc_flow_flags(ii):
+    base = drc_base_mnemonic(ii[2][0])
+    flags = 0
+    if base in ('bra', 'bsr', 'jmp', 'jsr') or base in DRC_BCC or base in DRC_DBCC:
+        flags |= DRC_FLOW_BRANCH
+    if base in DRC_BCC or base in DRC_DBCC or base in DRC_SCC:
+        flags |= DRC_FLOW_CONDITIONAL
+    if base in ('bra', 'jmp', 'rts', 'rte', 'rtr'):
+        flags |= DRC_FLOW_UNCONDITION
+    if base in ('rts', 'rte', 'rtr'):
+        flags |= DRC_FLOW_RETURN
+    # Ends a basic block: any control-flow alteration, plus returns and the
+    # exception generators that do not fall through linearly.
+    if base in ('bra', 'bsr', 'jmp', 'jsr', 'rts', 'rte', 'rtr', 'trap',
+                'trapv', 'illegal', 'linea', 'linef', 'stop', 'reset') \
+            or base in DRC_BCC or base in DRC_DBCC:
+        flags |= DRC_FLOW_ENDS_BLOCK
+    return flags
+
+
+def drc_can_fault(ii):
+    base = drc_base_mnemonic(ii[2][0])
+    src_ea = drc_ea_mode[ii[2][1]]
+    dst_ea = drc_ea_mode[ii[2][2]]
+    # Hard cfunc categories always fault-capable.
+    if base in DRC_HARD_CFUNC:
+        # move is only hard when it touches sr/usp; otherwise fall through to
+        # the memory-touch test below.
+        if base == 'move':
+            if src_ea in (DRC_EA_SR, DRC_EA_USP) or dst_ea in (DRC_EA_SR, DRC_EA_USP):
+                return True
+        elif base in ('andi', 'ori', 'eori'):
+            # only the ...,sr forms are privileged; ...,ccr and EA forms are not
+            if dst_ea == DRC_EA_SR:
+                return True
+        else:
+            return True
+    # Any memory-touching EA can address-error in user mode -> conservative.
+    if src_ea in DRC_EA_MEM or dst_ea in DRC_EA_MEM:
+        return True
+    # movem touches memory via a register list with an indirect EA already
+    # covered above; register-list-only forms still bus-access -> be safe.
+    if base == 'movem':
+        return True
+    return False
+
+
+def drc_reg_set_str(bits):
+    if bits == 0:
+        return "0"
+    names = []
+    for v, n in (
+        (DRC_REG_DN, "DRC_REG_DN"), (DRC_REG_AN, "DRC_REG_AN"),
+        (DRC_REG_CCR, "DRC_REG_CCR"), (DRC_REG_SR, "DRC_REG_SR"),
+        (DRC_REG_USP, "DRC_REG_USP"), (DRC_REG_PC, "DRC_REG_PC"),
+        (DRC_REG_SP, "DRC_REG_SP"),
+    ):
+        if bits & v:
+            names.append(n)
+    return " | ".join(names)
+
+
+def drc_flow_str(bits):
+    if bits == 0:
+        return "0"
+    names = []
+    for v, n in (
+        (DRC_FLOW_BRANCH, "DRC_FLOW_BRANCH"),
+        (DRC_FLOW_CONDITIONAL, "DRC_FLOW_CONDITIONAL"),
+        (DRC_FLOW_UNCONDITION, "DRC_FLOW_UNCONDITION"),
+        (DRC_FLOW_ENDS_BLOCK, "DRC_FLOW_ENDS_BLOCK"),
+        (DRC_FLOW_RETURN, "DRC_FLOW_RETURN"),
+    ):
+        if bits & v:
+            names.append(n)
+    return " | ".join(names)
+
+
+def generate_drcdesc_file(filename, argv_str):
+    out = open(filename, 'wt')
+    print("// license:BSD-3-Clause", file=out)
+    print("// copyright-holders:Mark Mackelprang", file=out)
+    print("// DRC decode-descriptor table for the m68000 (generated)", file=out)
+    print("", file=out)
+    print("// Generated by m68000gen.py %s" % argv_str, file=out)
+    print("//", file=out)
+    print("// This is an include fragment (.ipp): it is #included inside the", file=out)
+    print("// m68000_device class scope and is intentionally guard-free.  At this", file=out)
+    print("// PR boundary nothing includes it yet; the DRC frontend will consume it", file=out)
+    print("// so it reuses the interpreter's decode truth rather than re-deriving", file=out)
+    print("// decode.  All fields below are derived purely from the textual", file=out)
+    print("// mnemonic + operand tokens of m68000.lst.", file=out)
+    print("", file=out)
+
+    # Operand size.
+    print("// Operand data size.", file=out)
+    print("enum drc_size : u8 {", file=out)
+    print("\tDRC_SIZE_NONE    = 0, // no data size (branches / flow ops)", file=out)
+    print("\tDRC_SIZE_B       = 1, // byte", file=out)
+    print("\tDRC_SIZE_W       = 2, // word", file=out)
+    print("\tDRC_SIZE_L       = 3, // long", file=out)
+    print("\tDRC_SIZE_UNSIZED = 4  // genuinely indeterminate", file=out)
+    print("};", file=out)
+    print("", file=out)
+
+    # EA modes.
+    print("// Effective-address / operand modes.", file=out)
+    print("enum drc_ea : u8 {", file=out)
+    ea_order = [
+        (DRC_EA_NONE,  "no operand / not an EA"),
+        (DRC_EA_DREG,  "Dn"),
+        (DRC_EA_AREG,  "An"),
+        (DRC_EA_AIND,  "(An)"),
+        (DRC_EA_AINC,  "(An)+"),
+        (DRC_EA_ADEC,  "-(An)"),
+        (DRC_EA_DISP,  "(d16,An)"),
+        (DRC_EA_INDX,  "(d8,An,Xn)"),
+        (DRC_EA_ABSW,  "(xxx).W"),
+        (DRC_EA_ABSL,  "(xxx).L"),
+        (DRC_EA_PCDIS, "(d16,PC)"),
+        (DRC_EA_PCIDX, "(d8,PC,Xn)"),
+        (DRC_EA_IMM,   "immediate"),
+        (DRC_EA_DISPL, "branch displacement"),
+        (DRC_EA_REGL,  "movem register list"),
+        (DRC_EA_CCR,   "condition code register"),
+        (DRC_EA_SR,    "status register"),
+        (DRC_EA_USP,   "user stack pointer"),
+    ]
+    for v, desc in ea_order:
+        print("\t%-13s = %2d, // %s" % (drc_ea_name[v], v, desc), file=out)
+    print("};", file=out)
+    print("", file=out)
+
+    # Register category bits.
+    print("// Register read/write category bits (categories, not indices).", file=out)
+    print("enum drc_reg : u16 {", file=out)
+    print("\tDRC_REG_DN  = 0x0001, // a data register", file=out)
+    print("\tDRC_REG_AN  = 0x0002, // an address register", file=out)
+    print("\tDRC_REG_CCR = 0x0004, // condition codes", file=out)
+    print("\tDRC_REG_SR  = 0x0008, // full status register (supervisor)", file=out)
+    print("\tDRC_REG_USP = 0x0010, // user stack pointer", file=out)
+    print("\tDRC_REG_PC  = 0x0020, // program counter", file=out)
+    print("\tDRC_REG_SP  = 0x0040  // active stack pointer (A7)", file=out)
+    print("};", file=out)
+    print("", file=out)
+
+    # Flow flags.
+    print("// Control-flow flags.", file=out)
+    print("enum drc_flow : u8 {", file=out)
+    print("\tDRC_FLOW_BRANCH      = 0x01, // transfers control", file=out)
+    print("\tDRC_FLOW_CONDITIONAL = 0x02, // condition-dependent", file=out)
+    print("\tDRC_FLOW_UNCONDITION = 0x04, // always taken", file=out)
+    print("\tDRC_FLOW_ENDS_BLOCK  = 0x08, // terminates a basic block", file=out)
+    print("\tDRC_FLOW_RETURN      = 0x10  // subroutine/exception return", file=out)
+    print("};", file=out)
+    print("", file=out)
+
+    # Descriptor struct.
+    print("// One descriptor per (non-special) decoded instruction.  The", file=out)
+    print("// {value, mask} pair matches the corresponding s_packed_decode_table", file=out)
+    print("// entry, so a consumer can correlate rows by opcode pattern.", file=out)
+    print("struct drc_desc {", file=out)
+    print("\tu16 value;     // opcode match value", file=out)
+    print("\tu16 mask;      // opcode match mask", file=out)
+    print("\tu8  size;      // drc_size", file=out)
+    print("\tu8  src_ea;    // drc_ea (source operand)", file=out)
+    print("\tu8  dst_ea;    // drc_ea (destination operand)", file=out)
+    print("\tu16 reg_read;  // drc_reg bitmask read", file=out)
+    print("\tu16 reg_write; // drc_reg bitmask written", file=out)
+    print("\tu8  flow;      // drc_flow bitmask", file=out)
+    print("\tu8  can_fault; // 1 if the opcode has a fault/exception/priv surface", file=out)
+    print("};", file=out)
+    print("", file=out)
+
+    print("// 'static inline' (C++17 inline variable) makes this both a", file=out)
+    print("// declaration and a definition, so the fragment is self-contained", file=out)
+    print("// when #included inside the device class scope.", file=out)
+    print("static inline const drc_desc s_drc_desc_table[] = {", file=out)
+
+    def emit_row(value, mask, mnem_disp, ii):
+        size = drc_size_for(ii)
+        src_ea = drc_ea_mode[ii[2][1]]
+        dst_ea = drc_ea_mode[ii[2][2]]
+        rd, wr = drc_reg_sets(ii)
+        flow = drc_flow_flags(ii)
+        fault = drc_can_fault(ii)
+        print("\t{ 0x%04x, 0x%04x, %-16s, %-13s, %-13s, %-40s, %-40s, %-60s, %d }, // %s" % (
+            value, mask,
+            drc_size_name[size],
+            drc_ea_name[src_ea],
+            drc_ea_name[dst_ea],
+            drc_reg_set_str(rd),
+            drc_reg_set_str(wr),
+            drc_flow_str(flow),
+            1 if fault else 0,
+            mnem_disp), file=out)
+
+    # Mirror the 'decode' command's iteration and skip logic exactly so the
+    # row ordering lines up with s_packed_decode_table, then append the two
+    # LINEA/LINEF specials in the same way decode does.  The {value,mask} pair
+    # on every row lets a consumer correlate regardless.
+    for ii in instructions:
+        if ii[0] == 0xa000 or ii[0] == 0xf000 or ii[0] == 0x4afc:
+            continue
+        disp = "%s %s %s" % (ii[2][0], ii[2][1], ii[2][2])
+        emit_row(ii[0], ii[1], disp, ii)
+
+    # LINEA / LINEF specials (decode emits these after the main table).  Look
+    # up their .lst rows to describe them; both end a block and can fault.
+    for value, mask, label in ((0xa000, 0xf000, "linea"), (0xf000, 0xf000, "linef")):
+        src = None
+        for ii in instructions:
+            if ii[0] == value:
+                src = ii
+                break
+        if src is None:
+            src = [value, mask, [label, '-', '-']]
+        emit_row(value, mask, "%s %s %s (special)" % (src[2][0], src[2][1], src[2][2]), src)
+
+    print("};", file=out)
+    out.close()
 
 
 # Generate C++ source from the code
@@ -2479,6 +3043,11 @@ if sys.argv[1] == 'decode':
     print("\t{ 0xf000, 0xf000, S_LINEF },", file=out)
     print("\t{ }", file=out)
     print("};", file=out)
+
+# Generate the DRC decode-descriptor table
+
+if sys.argv[1] == 'drcdesc':
+    generate_drcdesc_file(sys.argv[3], ' '.join(sys.argv[1:]))
 
 # Generate the handler header
 

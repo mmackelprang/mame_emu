@@ -2146,6 +2146,7 @@ if CPUS["M680X0"] then
 		MAME_DIR .. "src/devices/cpu/m68000/m68000-sif.cpp",
 		MAME_DIR .. "src/devices/cpu/m68000/m68000-sdp.cpp",
 		MAME_DIR .. "src/devices/cpu/m68000/m68000-sip.cpp",
+		MAME_DIR .. "src/devices/cpu/m68000/m68000-drcdesc.ipp",
 		MAME_DIR .. "src/devices/cpu/m68000/m68000mcu-head.h",
 		MAME_DIR .. "src/devices/cpu/m68000/m68000mcu-sdfm.cpp",
 		MAME_DIR .. "src/devices/cpu/m68000/m68000mcu-sifm.cpp",
