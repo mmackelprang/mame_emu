@@ -408,6 +408,7 @@ public:
 		// away without touching the live interpreter.
 		snapshot_retired();
 		int frozen_consumed = -1;   // cycle count latched at trace dispatch, if any
+		m_did_not_retire = true;    // cleared the moment we break on a clean retirement
 		for (int guard = 0; guard < 512; ++guard)
 		{
 			// Refresh the pre-grant snapshot, and latch the cycle count, only while
@@ -434,10 +435,17 @@ public:
 			// accumulating them, keeping the pre-grant snapshot as the retired state.
 			// (A self / short-backward branch whose target IS the just-executed
 			// instruction leaves m_ipc == entry_ipc; those few cases never retire here
-			// and fall into the documented branch-self-loop residual rather than risk
-			// a substate-based boundary that mis-retires normal multi-cycle opcodes.)
+			// and instead exhaust the guard loop -- m_did_not_retire stays true, which
+			// the harness exposes via oracle_did_not_retire() so the test can mark
+			// exactly those cases residual, rather than guessing from a corpus PC delta
+			// that also matches ordinary not-taken short branches.  We avoid a
+			// substate-based boundary here because it mis-retires normal multi-cycle
+			// opcodes.)
 			if (m_ipc != entry_ipc)
+			{
+				m_did_not_retire = false;   // clean retirement
 				break;
+			}
 			consumed += 1 - *m_icountptr;
 		}
 
@@ -562,11 +570,19 @@ public:
 		m_ram_snap.assign(addrs.size(), 0);
 	}
 
+	// True iff the LAST step_instruction did NOT cleanly retire -- the single-step
+	// guard loop exhausted without m_ipc ever changing.  This is the precise,
+	// harness-observable signature of a self-referential branch (BSR -2 / Bcc -2
+	// onto itself), distinct from an ordinary not-taken short branch (which retires
+	// cleanly).  The test marks exactly these as the branch-self-loop residual.
+	virtual bool oracle_did_not_retire() const override { return m_did_not_retire; }
+
 private:
 	u32 m_retired_au = 0;
 	u32 m_retired_pc = 0;
 	u32 m_snap_da[17] = { 0 };
 	u16 m_snap_sr = 0;
+	bool m_did_not_retire = false;  // last step exhausted the guard without retiring
 	std::vector<u32> m_ram_watch;   // final-RAM addresses to snapshot at retirement
 	std::vector<u8>  m_ram_snap;    // their snapshotted values (parallel to m_ram_watch)
 };
@@ -1128,6 +1144,11 @@ void cpu_test_harness::set_ram_watch(const std::vector<uint32_t> &addrs)
 bool cpu_test_harness::snapshot_ram(uint32_t address, uint8_t &out) const
 {
 	return m_stepper->oracle_snapshot_ram(address, out);
+}
+
+bool cpu_test_harness::did_not_retire() const
+{
+	return m_stepper->oracle_did_not_retire();
 }
 
 void cpu_test_harness::write_ram(uint32_t address, uint8_t value)

@@ -111,6 +111,11 @@ public:
 	// Register the RAM addresses to snapshot at retirement (the case's final-RAM
 	// cells).  No-op for cores that read RAM live.
 	virtual void oracle_set_ram_watch(const std::vector<uint32_t> &) { }
+
+	// True iff the last single-step did NOT cleanly retire (the guard loop
+	// exhausted without reaching the next instruction) -- the m68000 self-branch
+	// signature.  Default false (z80/m6502 always retire cleanly).
+	virtual bool oracle_did_not_retire() const { return false; }
 };
 
 // Describes one CPU core: how to register its driver and how to translate
@@ -193,6 +198,10 @@ public:
 	// false (read live via read_ram) for cores/addresses without a snapshot.
 	void set_ram_watch(const std::vector<uint32_t> &addrs);
 	bool snapshot_ram(uint32_t address, uint8_t &out) const;
+
+	// True iff the last step_one_instruction did not cleanly retire (m68000
+	// self-branch signature; see oracle_did_not_retire).
+	bool did_not_retire() const;
 
 	// Reset the cross-instruction quirk state that a SingleStepTests fixture
 	// does not carry (e.g. the z80 HALT latch and pending NMI), so each case

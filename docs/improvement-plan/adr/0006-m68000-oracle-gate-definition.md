@@ -263,11 +263,14 @@ MAME-self-generated corpus or the harness's single-step model:
    it snapshots **after** the exception ran (`SR.S|T` flipped, a frame pushed, PC vectored, extra
    cycles). No uniform single-step model matches both. Signature: initial `SR.T` set, OR TAS/TRAPV,
    OR an address-error case.
-2. **Branch-self-loop (BSR/Bcc whose target re-enters the branching instruction).** A `BSR -2` /
+2. **Branch-self-loop (a branch whose target re-enters the branching instruction).** A `BSR -2` /
    `Bcc -2` branches onto itself; the harness single-step retires on the `m_ipc` change, which never
-   occurs for a self-branch, so the stepper re-executes it. BSR/Bcc are correct (the corpus, from
-   the same core, runs them once); this is a harness single-step limitation. Signature: BSR/Bcc with
-   `|final.pc − initial.pc| ≤ 4`. (~20 cases.)
+   occurs for a self-branch, so the guard loop exhausts without retiring. BSR/Bcc are correct (the
+   corpus, from the same core, runs them once); this is a harness single-step limitation.
+   **Signature: the harness's own `did_not_retire()` flag** (the step exhausted the guard with
+   `m_ipc == entry_ipc`) — a precise harness-observable signal, *not* a corpus PC-delta heuristic
+   (which would also exempt ordinary not-taken short branches, e.g. the 565 not-taken `Bcc +2`
+   cases, and create a blind spot). (~20 cases.)
 
 Two earlier suspected limitations were **fixed** (not accepted) during close-out, both harness-side,
 zero core change: MOVEP byte-lane (a cross-case stale-RAM gap, fixed by a per-case RAM scrub) and

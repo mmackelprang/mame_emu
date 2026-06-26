@@ -106,7 +106,9 @@ a corpus re-pin) and fails on it by design.
   address-error case.
 - **Branch-self-loop** (~20 cases): a `BSR -2` / `Bcc -2` branches onto itself, which
   the harness single-step (retire on `m_ipc` change) re-executes. BSR/Bcc are correct
-  (the corpus runs them once). Signature: BSR/Bcc with `|final.pc − initial.pc| ≤ 4`.
+  (the corpus runs them once). Signature: the harness's own `did_not_retire()` flag
+  (the step exhausted the guard with `m_ipc == entry_ipc`) — a precise harness signal,
+  not a corpus PC-delta heuristic that would also exempt not-taken short branches.
 
 Two earlier suspected limitations were **fixed**, harness-side, zero core change:
 **MOVEP** byte-lane (a cross-case stale-RAM gap → per-case RAM scrub) and the

@@ -655,19 +655,19 @@ bool m68000_cycle_exempt(const std::string &fname, const rapidjson::Value &test)
 	return false;
 }
 
-// Principled predicate for the documented deferred-trace / exception STATE+CYCLE
-// residual (ADR 0006, owner-ratified): a case is EXPECTED to potentially diverge
-// iff its initial SR has the trace bit set (SR_T, 0x8000 -- the corpus
-// inconsistently captures the deferred trace), OR it is on the TAS/TRAPV
+// Principled CORPUS-DATA residual predicate for the documented deferred-trace /
+// exception STATE+CYCLE residual (ADR 0006, owner-ratified): a case is EXPECTED to
+// potentially diverge iff its initial SR has the trace bit set (SR_T, 0x8000 -- the
+// corpus inconsistently captures the deferred trace), OR it is on the TAS/TRAPV
 // file-level allowlist (upstream-flagged), OR it carries the address-error marker
 // (the corpus runs a group-0 frame the harness's uniform retirement snapshot can't
-// mirror).  This is keyed on the corpus's OWN deferred-exception signature, not on
-// "wherever the harness diverges", so it cannot hide a real bug: every case
-// OUTSIDE it is hard-REQUIRE'd to match strictly, and the count of out-of-residual
-// divergences is asserted == 0.
-// Branch opcodes whose target can land on/within the branching instruction.
-const std::set<std::string> k_m68000_branch_files = { "BSR.json", "Bcc.json" };
-
+// mirror).  Keyed on the corpus's OWN deferred-exception signature, not on "wherever
+// the harness diverges", so it cannot hide a real bug.  The branch-self-loop class
+// is decided SEPARATELY at the call site from the harness's own did_not_retire()
+// signal (the precise self-loop signature) -- NOT a corpus PC-delta heuristic, which
+// would also exempt ordinary not-taken short branches and create a blind spot.
+// Every case outside (this predicate OR did_not_retire()) is hard-REQUIRE'd, and the
+// count of out-of-residual divergences is asserted == 0.
 bool m68000_residual_expected(const std::string &fname, const rapidjson::Value &test)
 {
 	if (k_m68000_cycle_allowlist_files.count(fname))   // TAS / TRAPV
@@ -675,26 +675,9 @@ bool m68000_residual_expected(const std::string &fname, const rapidjson::Value &
 	if (test.HasMember("addr_error") && test["addr_error"].IsBool() && test["addr_error"].GetBool())
 		return true;
 	const rapidjson::Value &initial = test["initial"];
-	const rapidjson::Value &final = test["final"];
 	if (initial.HasMember("sr") && initial["sr"].IsInt()
 			&& (std::uint32_t(initial["sr"].GetInt()) & 0x8000u))
 		return true;   // deferred-trace signature
-	// Branch-self-loop signature: a taken BSR/Bcc whose target re-enters the
-	// branching instruction's own prefetch window (corpus |final.pc - initial.pc|
-	// <= 4, i.e. a BSR/Bcc -4..+2 that branches onto/just-after itself).  The
-	// harness single-step retires on the m_ipc change, but a self-branch leaves
-	// m_ipc == entry_ipc, so the stepper re-executes the branch -- a harness
-	// single-step limitation on self-referential branches, NOT a core bug (BSR/Bcc
-	// execute correctly; the corpus, from the same core, runs them once).  Keyed on
-	// the corpus's own PC delta, so it cannot mask an unrelated divergence.
-	if (k_m68000_branch_files.count(fname)
-			&& initial.HasMember("pc") && initial["pc"].IsInt64()
-			&& final.HasMember("pc") && final["pc"].IsInt64())
-	{
-		const std::int64_t d = std::int64_t(final["pc"].GetInt64()) - std::int64_t(initial["pc"].GetInt64());
-		if (d >= -4 && d <= 4)
-			return true;
-	}
 	return false;
 }
 
@@ -914,10 +897,16 @@ TEST_CASE("CPU oracle m68000 SingleStepTests", "[cpu][m68000]")
 							}
 						}
 
-						// Hard-fail policy: a state divergence is a REAL finding --
-						// REQUIRE'd -- UNLESS it falls in the documented deferred-exception
-						// residual (and we're not in strict mode, which REQUIREs all).
-						const bool residual = m68000_residual_expected(fname, test);
+						// Hard-fail policy: a state/cycle divergence is a REAL finding --
+						// REQUIRE'd -- UNLESS it falls in the documented residual (and
+						// we're not in strict mode, which REQUIREs all).  The residual is
+						// the corpus-data deferred-exception classes OR the harness's own
+						// self-branch signature (the step did not cleanly retire -- a
+						// self-referential BSR/Bcc the single-step re-executes; this is
+						// the precise signal, not a corpus PC-delta heuristic that would
+						// also exempt ordinary not-taken short branches).
+						const bool residual = m68000_residual_expected(fname, test)
+								|| harness.did_not_retire();
 						if (!case_state_ok)
 						{
 							++state_div;
