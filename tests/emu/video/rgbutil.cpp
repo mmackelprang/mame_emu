@@ -55,19 +55,28 @@ TEST_CASE("check rgb", "[emu][video]")
 		return result;
 	};
 
-	volatile s32 expected_a, expected_r, expected_g, expected_b;
-	volatile s32 actual_a, actual_r, actual_g, actual_b;
-	volatile s32 imm;
+	// NOTE: these scratch values were historically 'volatile' to discourage the
+	// optimiser from eliding the vector maths under test.  Under C++20 that makes
+	// the chained "expected_x += actual_x = random_i32()" assignment expressions
+	// trip -Werror=volatile ("using value of assignment with volatile-qualified
+	// left operand is deprecated"), which breaks a strict TESTS=1 build under
+	// modern GCC.  The barrier is not needed for correctness -- Catch2's REQUIRE
+	// reads every value back, keeping the computations observably live, and the
+	// comment above already notes it is fine if some ops are optimised out -- so
+	// the qualifier is dropped.
+	s32 expected_a, expected_r, expected_g, expected_b;
+	s32 actual_a, actual_r, actual_g, actual_b;
+	s32 imm;
 	rgbaint_t rgb, other;
 	rgb_t packed;
 	auto check_expected = [&] ()
 	{
-		const volatile s32 a = rgb.get_a32();
-		const volatile s32 r = rgb.get_r32();
-		const volatile s32 g = rgb.get_g32();
-		const volatile s32 b = rgb.get_b32();
+		const s32 a = rgb.get_a32();
+		const s32 r = rgb.get_r32();
+		const s32 g = rgb.get_g32();
+		const s32 b = rgb.get_b32();
 		REQUIRE(a == expected_a);
-		(r == expected_r);
+		REQUIRE(r == expected_r);
 		REQUIRE(g == expected_g);
 		REQUIRE(b == expected_b);
 	};
