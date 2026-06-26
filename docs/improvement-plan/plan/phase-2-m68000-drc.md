@@ -1,9 +1,9 @@
 # Phase 2 — m68000 → DRCUML port (Pick 2)
 
-> **Status:** Planned · **Consumes:** ADR [0002](../adr/0002-m68000-drcuml-port.md)
+> **Status:** In progress — **PR boundary K shipped** (Tasks 1–2) · **Consumes:** ADR [0002](../adr/0002-m68000-drcuml-port.md)
 > **Hard gate:** ADR [0001](../adr/0001-differential-cpu-oracle.md) — the m68000 oracle
 > **Spec:** [`../specs/2026-06-24-mame-improvements-design.md`](../specs/2026-06-24-mame-improvements-design.md)
-> **Date:** 2026-06-24
+> **Date:** 2026-06-24 · **Last updated:** 2026-06-26 (boundary K)
 
 ## Goal
 
@@ -71,7 +71,7 @@ PR, but `./mame -validate` and the interpreter leg must remain green.)
 
 ---
 
-## Task 1 — Verify the gate and pin the increment-1 opcode cut line
+## Task 1 — Verify the gate and pin the increment-1 opcode cut line ✅ DONE (PR boundary K)
 
 - **Files:** none (gate verification) + `src/devices/cpu/m68000/README-drc.md` (new doc
   capturing the cut line and the cycle-adapter inherited from Phase 1).
@@ -84,7 +84,7 @@ PR, but `./mame -validate` and the interpreter leg must remain green.)
   backend with cycle equality. **Green:** gate confirmed; if not green, **stop — Phase 2
   is blocked** (escalate to Phase 1, Task 5).
 
-### Task 2 — Single-source the DRC decode descriptors (generator extension)
+### Task 2 — Single-source the DRC decode descriptors (generator extension) ✅ DONE (PR boundary K)
 
 - **Files (edit):** `src/devices/cpu/m68000/m68000gen.py` (124 KB), inputs `m68000.lst` /
   `m68k_in.lst`; **regenerate** the committed outputs (`m68000-decode.cpp`,
@@ -105,6 +105,12 @@ PR, but `./mame -validate` and the interpreter leg must remain green.)
 
 > **PR boundary K** (Tasks 1–2): generator extension + cut-line doc. **No behavior change
 > yet** — the oracle proves decode is untouched. Reviewable in isolation.
+> **✅ Shipped.** `m68000gen.py` now emits `m68000-drcdesc.ipp` (1527 descriptor rows);
+> regenerating the existing committed decode files (`m68000-decode.cpp`, `m68000-head.h`,
+> `m68000-s{d,i}{f,p}.cpp`) leaves them **byte-identical** (empty `git diff`, additive-only).
+> An `enum_str()` shim keeps that byte-identity on Python ≥ 3.11. The m68000 oracle
+> (`mametests "[m68000]"`) is **green** (317,885 assertions). Cut line captured in
+> `src/devices/cpu/m68000/README-drc.md`. **Boundary L is next.**
 
 ### Task 3 — DRC frontend skeleton (`m68000fe.{cpp,h}`) — block walk, no UML emit
 
@@ -252,7 +258,7 @@ PR, but `./mame -validate` and the interpreter leg must remain green.)
 
 | PR | Tasks | Theme | Gate |
 |---|---|---|---|
-| K | 1–2 | Gate check + generator descriptor extension | oracle green (decode unchanged) |
+| K ✅ | 1–2 | Gate check + generator descriptor extension | oracle green (decode unchanged) — **shipped (PR boundary K)** |
 | L | 3–4 | Frontend skeleton + dual-path plumbing (100% `cfunc_`) | dual-leg oracle (full fallback) |
 | M | 5 | Native UML for the common-path opcode set | dual-leg oracle, cycle-exact |
 | N | 6–7 | Native-coverage assertion + throughput bar | coverage + speedup ≥ bar |
