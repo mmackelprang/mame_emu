@@ -65,6 +65,14 @@ CHECKSUM_INDEX = "checksums.sha256"
 FETCH_STAMP = ".fetch_stamp.json"
 _BOOKKEEPING = {CHECKSUM_INDEX, FETCH_STAMP}
 
+# Version of the in-fetcher decoder output schema.  Bump this whenever the
+# *decoded* JSON the harness consumes changes shape (e.g. a new per-case field),
+# so an existing cache built by an older decoder is detected as stale and
+# re-decoded even though the upstream archive (and its sha256) is unchanged.
+#   v1: registers + prefetch + ram + length
+#   v2: + per-case `addr_error` marker (ADR 0006 case-level cycle allowlist)
+DECODER_VERSION = 2
+
 # Stream downloads/hashing in chunks to keep memory flat on ~1 GB archives.
 _CHUNK = 1024 * 1024
 
@@ -147,23 +155,42 @@ def _m68k_read_state(content, ptr):
     return ptr, state
 
 
-def _m68k_skip_transactions(content, ptr):
-    """Consume the transactions block, returning (ptr, num_cycles).
+# Upstream transaction type bytes (SingleStepTests/m68000 decode.py): 0=idle,
+# 1=write, 2=read, 3=TAS cycle, 4=read address error (AS not asserted),
+# 5=write address error (AS not asserted).  The two address-error types mark a
+# case whose bus activity diverges from a normally-committed access -- they are
+# the case-level cycle-divergence allowlist key for the m68000 oracle gate
+# (ADR 0006 Leg A): the corpus does not commit results when AS isn't asserted,
+# so its cycle count for those cases is not comparable to the live core's.
+_M68K_TW_READ_ADDR_ERROR = 4
+_M68K_TW_WRITE_ADDR_ERROR = 5
 
-    The per-cycle bus log itself is discarded; only its ``num_cycles`` count is
-    kept (as the fixture's architectural cycle length)."""
+
+def _m68k_skip_transactions(content, ptr):
+    """Consume the transactions block, returning (ptr, num_cycles, addr_error).
+
+    The verbose per-cycle bus log itself is discarded (the harness measures
+    cycles from the core, not from the log -- decision #2, ADR 0006), but two
+    summary facts are kept: ``num_cycles`` (the fixture's architectural cycle
+    length) and ``addr_error`` -- True iff any transaction is a read/write
+    address-error cycle (``re``/``we``).  ``addr_error`` is the single bit the
+    case-level cycle allowlist needs; keeping just the bit (not the whole log)
+    keeps the cache small while making the address-error cases self-describing."""
     _numbytes, magic = struct.unpack_from("<II", content, ptr)
     ptr += 8
     if magic != _M68K_MAGIC_TRANS:
         raise FetchError("m68000 decode: bad transactions magic 0x{:08x}".format(magic))
     num_cycles, num_transactions = struct.unpack_from("<II", content, ptr)
     ptr += 8
+    addr_error = False
     for _ in range(num_transactions):
         tw = struct.unpack_from("<B", content, ptr)[0]
         ptr += 5  # type byte + 4-byte cycle count
+        if tw in (_M68K_TW_READ_ADDR_ERROR, _M68K_TW_WRITE_ADDR_ERROR):
+            addr_error = True
         if tw != 0:
             ptr += 20  # fc, addr, data, UDS, LDS (5 x u32)
-    return ptr, num_cycles
+    return ptr, num_cycles, addr_error
 
 
 def _decode_m68000_bin(blob):
@@ -183,7 +210,11 @@ def _decode_m68000_bin(blob):
         ptr, test["name"] = _m68k_read_name(blob, ptr)
         ptr, test["initial"] = _m68k_read_state(blob, ptr)
         ptr, test["final"] = _m68k_read_state(blob, ptr)
-        ptr, test["length"] = _m68k_skip_transactions(blob, ptr)
+        ptr, test["length"], addr_error = _m68k_skip_transactions(blob, ptr)
+        # Only emit the marker when present, so the bit stays out of the vast
+        # majority of (non-address-error) cases and the cache stays compact.
+        if addr_error:
+            test["addr_error"] = True
         tests.append(test)
     return tests
 
@@ -355,12 +386,16 @@ def _read_checksum_index(dest_dir):
     return index
 
 
-def _verify_cached(dest_dir, expected_sha):
+def _verify_cached(dest_dir, expected_sha, decoder_version):
     """Verify an existing cache dir against its stamp + per-file index.
 
     Returns the number of verified vector files on success.  Raises FetchError
     with a clear hash-mismatch message if any cached byte has changed, or
     returns None if the cache is incomplete/absent (caller should (re)fetch).
+
+    ``decoder_version`` is the schema version of the decoder that produces the
+    cached files (None for cores with no in-fetcher decode step); a cache built
+    by a different decoder version is treated as stale and re-decoded.
     """
     stamp_path = os.path.join(dest_dir, FETCH_STAMP)
     index_path = os.path.join(dest_dir, CHECKSUM_INDEX)
@@ -371,6 +406,11 @@ def _verify_cached(dest_dir, expected_sha):
         stamp = json.load(fh)
     if stamp.get("archive_sha256") != expected_sha:
         # The manifest was re-pinned since this cache was built -- refetch.
+        return None
+    if decoder_version is not None and stamp.get("decoder_version") != decoder_version:
+        # The decoder output schema changed since this cache was built (e.g. a
+        # new per-case field); the archive is unchanged but the decoded JSON is
+        # stale -- refetch + re-decode.
         return None
 
     index = _read_checksum_index(dest_dir)
@@ -408,8 +448,12 @@ def fetch_core(manifest, core):
     expected_sha = entry["sha256"].lower()
     dest_dir = os.path.join(CACHE_ROOT, core)
 
+    # Cores that decode a custom binary container in the fetcher carry a decoder
+    # schema version so a cache built by an older decoder self-invalidates.
+    decoder_version = DECODER_VERSION if entry.get("format") == "m68000_bin" else None
+
     # Idempotent fast path: a complete, untampered cache is a no-op.
-    already = _verify_cached(dest_dir, expected_sha)
+    already = _verify_cached(dest_dir, expected_sha, decoder_version)
     if already is not None:
         print("[{}] already verified {} files (no-op)".format(core, already))
         return already
@@ -466,6 +510,8 @@ def fetch_core(manifest, core):
             "archive_sha256": actual_sha,
             "file_count": len(names),
         }
+        if decoder_version is not None:
+            stamp["decoder_version"] = decoder_version
         with open(os.path.join(dest_dir, FETCH_STAMP), "w", encoding="utf-8", newline="\n") as fh:
             json.dump(stamp, fh, indent=2, sort_keys=True)
             fh.write("\n")

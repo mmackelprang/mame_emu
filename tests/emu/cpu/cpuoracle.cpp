@@ -34,6 +34,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
+#include <map>
 #include <set>
 #include <string>
 #include <vector>
@@ -542,61 +543,110 @@ TEST_CASE("CPU oracle m6502 SingleStepTests", "[cpu][m6502]")
 
 
 //**************************************************************************
-//  M68000 ORACLE (Task 5)
+//  M68000 ORACLE (Task 5) -- ADR 0006 Leg A
 //**************************************************************************
 //
 //  Drives the NEW microcode m68000 core (m68000_device::execute_run()), not
 //  Musashi.  This leg lands the full m68000 harness path -- the binary-fixture
 //  decoder (tests/cpuoracle/fetch_vectors.py), the register map, the PC /
-//  prefetch-queue adapter, the supervisor/USP/SSP handling, the microcode
-//  sub-cycle single-step, and the cycle adapter -- and exercises it end-to-end
-//  across the whole corpus.
+//  prefetch-queue adapter (m_au), the supervisor/USP/SSP banking, the deferred-
+//  trace snapshot, the microcode sub-cycle single-step, and the cycle adapter --
+//  and replays the whole pinned corpus against the ADR 0006 Leg-A bar.
+//
+//  STATUS: the harness reaches ~99.1% architectural-state equality and ~99.4%
+//  cycle equality (up from ~30% before the m_au PC adapter + update_user_super
+//  banking + deferred-trace snapshot landed here).  The remaining ~0.9% is a
+//  CORPUS-PROVENANCE limitation (the corpus is inconsistent on deferred-trace
+//  capture) plus a candidate MOVEP byte-lane finding -- see the BLOCKER note in
+//  the TEST_CASE.  The DEFAULT gate is therefore a GREEN reporting run that WARNs
+//  the exact residual; CPUORACLE_M68_STRICT=1 enables the hard Leg-A REQUIREs.
+//
+//  --- Authority asymmetry (ADR 0006) ---
+//  Unlike z80/m6502, whose corpora are INDEPENDENTLY derived, the m68000 corpus
+//  is itself MAME-generated ("Generated using the microcoded core in MAME ... any
+//  bugs that exist in MAME's microcoded M68000 emulator will exist here too").
+//  So the in-tree interpreter (-drc 0) is the AUTHORITY and the corpus is a
+//  conformance probe.  We never edit the core to match the corpus; an unexplained
+//  cycle mismatch is either traced to corpus provenance (allowlisted with a
+//  citation) or surfaced as a core finding -- never silently skipped.
+//
+//  --- The Leg-A gate (ADR 0006 acceptance criteria 1 + 2) ---
+//   * STATE equality -- target 100%, NO exemptions.  Every mapped register, the
+//     full CCR/SR, and every fixture final-RAM cell must match exactly, for every
+//     replayed case (allowlisted opcodes included -- the allowlist exempts only
+//     the *cycle* comparison, never state).  CURRENT: ~99.1%; the gap is the
+//     corpus-provenance residual in the BLOCKER note, pending owner disposition.
+//   * CYCLE-COUNT equality -- 100% EXCEPT the frozen, provenance-cited allowlist:
+//       - TAS  (file-level): corpus omits the special 5-cycle RMW timing
+//         (upstream STATUS: "doesn't properly handle the ... TAS read-modify-write
+//         timing").
+//       - TRAPV (file-level): corpus generation flagged an S-bit-dependent
+//         triggering issue (upstream STATUS: "appears to trigger incorrectly based
+//         on the S bit").
+//       - address-error cases (case-level): any case whose transaction log carried
+//         a read/write address-error cycle ("re"/"we"; AS isn't asserted and
+//         results aren't committed upstream).  Surfaced by the fetcher as a
+//         per-case `addr_error` marker (see fetch_vectors.py).  Only the *cycle*
+//         assert is skipped for these; STATE is still asserted.
+//     Per decision #2 (ADR 0006 OQ#2) Leg A asserts cycle COUNT + final state, not
+//     the per-cycle bus transaction log (deferred as a later ratchet).
 //
 //  --- Single-step + adapters (the artifact ADR 0002's DRC port consumes) ---
-//   * Fixtures: a custom binary container decoded to JSON at fetch time; each
-//     case carries 19 registers, a `prefetch` queue, byte-addressed `ram`, and
-//     a `length` cycle count (no per-cycle `cycles` array).
+//   * Fixtures: a custom binary container decoded to JSON at fetch time; each case
+//     carries 19 registers, a `prefetch` queue, byte-addressed `ram`, a `length`
+//     cycle count, and (when present) an `addr_error` marker.
 //   * Apply order: RAM first (the eager prefetch on PC-write reads opcode words
-//     from it), then SR (state_import(SR) -> update_user_super() selects USP vs
-//     SSP as the live a7 and swaps the program space), then the other registers,
-//     then PC last.
-//   * PC / prefetch adapter: the corpus `pc` is the 68000 prefetch pointer -- it
-//     addresses the word *after* the two prefetched words, so IR lives at pc-4
-//     and IRC at pc-2.  state_import reads IR from m_ipc and IRC from m_ipc+2, so
-//     we write GENPC = pc-4 going in and compare against m_pc+2 coming out.
-//   * Single-step: the microcode core advances one bus phase per icount and
-//     latches the instruction address in m_ipc at each instruction start.  We
-//     grant one cycle at a time and retire on the m_ipc change; the summed
-//     icount is the corpus `length` (the cycle adapter is the identity).
+//     from it), then SR (state_import(SR) settles the supervisor bit), then the
+//     other registers, then PC last.
+//   * PC / prefetch adapter (ADR 0006 blocker #1): the corpus `pc` is the 68000
+//     prefetch pointer, encoded from MAME's m_au (= instruction start + 4), NOT
+//     STATE_GENPC's m_pc (= start + 2).  state_import sets m_au = m_ipc + 4 on a PC
+//     write (m68000.cpp:367), so we write GENPC = corpus_pc - 4 going in (making
+//     m_au == corpus_pc) and read the retired PC straight from m_au coming out via
+//     oracle_retired_pc().  This is a pure harness-side read-back adapter -- m_au is
+//     a protected member reachable from the oracle subclass; no shared-core change.
+//   * Single-step: the microcode core advances one bus phase per icount and latches
+//     the instruction address in m_ipc at each instruction start.  We grant one
+//     cycle at a time and retire on the m_ipc change; the summed icount is the
+//     corpus `length` (the cycle adapter is the identity).
+
+namespace {
+
+// --- Frozen cycle-divergence allowlist (single-sourced; ADR 0006 §4) ---------
 //
-//  --- Strict-equality status (READ THIS / the review items) ---
-//  This leg ships as a GREEN end-to-end smoke that drives every case through the
-//  harness and REPORTS the per-core agreement rate; the hard strict-equality
-//  REQUIREs are gated behind CPUORACLE_M68_STRICT=1.  Pre-merge review caught a
-//  real cycle-accounting off-by-one in the stepper (cycles charged by the step
-//  that retires the instruction belong to the *next* instruction and must not be
-//  counted) -- fixed here, which lifted exact agreement from 0% to ~30%.  The
-//  remaining gap is two open items laid out for the coordinator/Phase-2 owner
-//  (ADR 0001 / the PR description carry the full writeup):
+// Mirrors the m6502 leg's evidence-based k_jam_files/k_unstable_files pattern.
+// FILE-LEVEL entries exempt a whole opcode's cycle comparison; the address-error
+// CASE-LEVEL exemption is keyed off the fetcher's per-case `addr_error` marker
+// (not a file name).  Each entry carries an upstream-provenance rationale; the
+// list is frozen -- additions require a provenance citation in review.  State is
+// NEVER allowlisted (ADR 0006 acceptance criterion 1).
 //
-//   1. PC / prefetch-pointer adapter + first-instruction priming.  The corpus
-//      `pc` is the prefetch pointer; the m_pc-vs-corpus offset our adapter applies
-//      (+2) is right for some cases and off by a word for others depending on how
-//      far the prefetch pipeline has advanced at our retirement point (and the
-//      very first instruction after machine start is cold).  Nailing the exact
-//      retirement phase + a robust priming sequence is the main remaining work.
-//   2. Deferred trace exception + corpus version drift.  Cases with SR.T set are
-//      snapshotted by the corpus BEFORE the trace exception the microcode
-//      schedules at an instruction's final step (so they are skipped below), and
-//      the corpus itself pins NO MAME version ("any bugs that exist in MAME's
-//      microcoded M68000 emulator will exist here too"; TAS/TRAPV/address-error
-//      flagged divergent) -- a subset of instructions genuinely differ from this
-//      tree's core.  Re-pinning the corpus to the matching MAME revision is the
-//      likely close-out.
-//
-//  The harness, binary decoder and register adapters are otherwise correct -- they
-//  reproduce the matching cases exactly; the open items are the prefetch-phase
-//  adapter and core/corpus reconciliation, not gross harness defects.
+//   TAS.json   -- upstream STATUS: TAS "doesn't properly handle the special
+//                 5-cycle TAS read-modify-write timing"; the corpus `length`
+//                 omits it.  Whole opcode flagged -> file-level.
+//   TRAPV.json -- upstream STATUS: TRAPV "appears to trigger incorrectly based on
+//                 the S bit" during corpus generation.  Whole opcode flagged ->
+//                 file-level.
+const std::set<std::string> k_m68000_cycle_allowlist_files = {
+	"TAS.json",
+	"TRAPV.json",
+};
+
+// True iff this case's cycle comparison is exempt: either its opcode file is on
+// the file-level allowlist, or the case carries the `addr_error` marker (a
+// read/write address-error "re"/"we" transaction, where AS isn't asserted and
+// the corpus doesn't commit a comparable bus-cycle count -- case-level per
+// decision #1 / ADR 0006 OQ#1).
+bool m68000_cycle_exempt(const std::string &fname, const rapidjson::Value &test)
+{
+	if (k_m68000_cycle_allowlist_files.count(fname))
+		return true;
+	if (test.HasMember("addr_error") && test["addr_error"].IsBool() && test["addr_error"].GetBool())
+		return true;
+	return false;
+}
+
+} // anonymous namespace
 
 TEST_CASE("CPU oracle m68000 SingleStepTests", "[cpu][m68000]")
 {
@@ -611,60 +661,88 @@ TEST_CASE("CPU oracle m68000 SingleStepTests", "[cpu][m68000]")
 	if (cap != 0 && fixtures.size() > cap)
 		fixtures.resize(cap);
 
-	// Strict equality is gated until the corpus is re-pinned to this core's
-	// revision (see the header note).  Default: end-to-end smoke that reports the
-	// agreement rate.  CPUORACLE_M68_STRICT=1: hard REQUIRE on state + cycle.
+	// Gate mode.  The ADR 0006 Leg-A bar is 100% architectural-state equality +
+	// cycle-equality-minus-allowlist.  The harness reaches ~99.1% state / ~99.4%
+	// cycle, and the residual ~0.9% traces to a CORPUS-PROVENANCE limitation that
+	// blocks a clean strict gate -- see the BLOCKER note below.  So the DEFAULT is
+	// a GREEN reporting gate: it replays every case, tallies every divergence by
+	// field/file, and WARNs the exact residual (auditable, not silent) without
+	// hard-failing.  CPUORACLE_M68_STRICT=1 flips on the hard REQUIREs (state +
+	// cycle-minus-allowlist) so the gate can be exercised strictly once the
+	// owner-ratified disposition of the residual lands.  CPUORACLE_M68_DIAG=1 is
+	// kept as an alias of the default reporting mode for callers/scripts.
+	//
+	// === BLOCKER (for the owner / Planner) -- strict Leg-A is not yet reachable ===
+	// The pinned m68000 corpus is INTERNALLY INCONSISTENT in how it captures the
+	// deferred TRACE exception (SR.T set, 50% of the corpus): for most opcodes it
+	// snapshots state BEFORE the trace (SR.T kept, no frame), but for ~38 k cases
+	// (taken branches, and opcodes that take their own exception -- ILLEGAL/TRAP/
+	// CHK/RTE/MOVEtoSR ...) it snapshots state AFTER the trace ran (SR.T cleared,
+	// SR.S set, a supervisor frame pushed, PC vectored, ~34 extra cycles).  No
+	// single uniform harness model matches both: modelling the trace away matches
+	// the pre-trace majority but misses the post-trace cases, and vice-versa.  This
+	// is exactly the MAME-self-generated-snapshot inconsistency ADR 0006 warned
+	// about -- but ADR 0006's "STATE has no allowlist" rule does not accommodate a
+	// corpus that is itself inconsistent on STATE.  The residual is NOT cleanly
+	// allowlistable either: the obvious "corpus ran the trace" predicate matches
+	// ~38 k cases of which only ~1 k actually diverge, so allowlisting it would be a
+	// huge convenience-skip that hides ~37 k passing cases (and could mask a real
+	// bug) -- which ADR 0006 forbids.  Disposition is an owner/Planner call:
+	//   (a) amend ADR 0006 to permit a documented, provenance-cited STATE allowlist
+	//       for the trace-inconsistent + TRAPV cases; or
+	//   (b) re-pin / regenerate the corpus to one with consistent trace capture; or
+	//   (c) accept the ~99% reporting bar for Leg A (the interpreter is the
+	//       authority regardless; Phase-2's load-bearing guarantee is Leg B,
+	//       interpreter == DRC, which is corpus-drift-immune).
+	// Separately, MOVEP.l/w shows a byte-lane RAM divergence (~466 cases) that is
+	// NOT provenance-explained -- a CANDIDATE real finding (harness flat-RAM model
+	// vs the 68000 peripheral byte-lane), surfaced for investigation, NOT
+	// allowlisted.  See the PR body / report for the full residual breakdown.
 	const bool strict = (std::getenv("CPUORACLE_M68_STRICT") != nullptr);
+	const bool diag = !strict;   // default = report-only (green); strict = hard REQUIRE
 
 	cpuoracle::cpu_test_harness harness(cpuoracle::m68000_core_descriptor());
 
-	std::size_t total_cases = 0;
-	std::size_t agree_cases = 0;
+	std::size_t total_cases = 0;        // cases whose cycle count was compared (i.e. checked)
+	std::size_t allowlisted_cycle = 0;  // cases whose cycle assert was skipped (allowlist)
+	std::size_t state_div = 0;          // diag: cases with a state divergence
+	std::size_t cycle_div = 0;          // diag: non-allowlisted cases with a cycle divergence
+	std::map<std::string, std::size_t> diag_state_by_file;
+	std::map<std::string, std::size_t> diag_cycle_by_file;
+	std::map<std::string, std::size_t> diag_state_by_field;  // diag: which field diverged
 
 	const bool ran = harness.run_with_machine(
-			[&harness, &fixtures, &total_cases, &agree_cases, strict] ()
+			[&] ()
 			{
 				for (const fs::path &path : fixtures)
 				{
+					const std::string fname = path.filename().string();
+
 					std::string text;
 					REQUIRE(read_file(path, text));
 
 					rapidjson::Document doc;
 					doc.Parse(text.c_str());
-					INFO("fixture: " << path.filename().string());
+					INFO("fixture: " << fname);
 					REQUIRE_FALSE(doc.HasParseError());
 					REQUIRE(doc.IsArray());
 
 					for (const auto &test : doc.GetArray())
 					{
 						const std::string case_name = test.HasMember("name") ? test["name"].GetString() : "<unnamed>";
-						INFO("fixture: " << path.filename().string() << "  case: " << case_name);
+						INFO("fixture: " << fname << "  case: " << case_name);
 
 						const rapidjson::Value &initial = test["initial"];
 						const rapidjson::Value &final = test["final"];
-
-						// Skip cases whose initial SR has the trace bit (SR_T,
-						// 0x8000) set.  The corpus snapshots state BEFORE the
-						// deferred trace exception that a set SR_T schedules at an
-						// instruction's final microcode step; our stepper retires on
-						// the m_ipc change, by which point the trace entry has run
-						// (clearing SR_T, setting SR_S, vectoring PC, pushing the
-						// supervisor frame) and -- crucially -- the dirtied state
-						// leaks into following cases.  Excluding T-set cases keeps
-						// the agreement figure honest (it measures the harness vs the
-						// corpus, not trace cross-talk); modelling the deferred trace
-						// is part of the same corpus-re-pin review item.
-						if (initial.HasMember("sr") && initial["sr"].IsInt()
-								&& (std::uint32_t(initial["sr"].GetInt()) & 0x8000u))
-							continue;
 
 						REQUIRE(test.HasMember("length"));
 						const int expected_cycles = int(test["length"].GetInt64());
 
 						// apply initial state -- RAM first (PC-write prefetches from
-						// it), then SR (selects the live a7 + program space), then
-						// the other registers, then PC last with the prefetch-pointer
-						// adapter (GENPC = corpus_pc - 4).
+						// it), then SR (settles the supervisor bit before the PC write
+						// re-parks the core), then the other registers, then PC last
+						// with the prefetch-pointer adapter (GENPC = corpus_pc - 4, so
+						// m_au == corpus_pc on entry).
 						harness.prepare_case();
 						apply_ram(harness, initial);
 						if (initial.HasMember("sr") && initial["sr"].IsInt())
@@ -685,26 +763,45 @@ TEST_CASE("CPU oracle m68000 SingleStepTests", "[cpu][m68000]")
 						// run exactly one architectural instruction
 						const int consumed = harness.step_one_instruction(expected_cycles);
 
-						// compare full state; in smoke mode tally agreement, in
-						// strict mode hard-assert.
-						bool case_ok = true;
+						// --- STATE equality (criterion 1: 100%, no exemptions) ---
+						// Read the retired PC from m_au (corpus convention) rather
+						// than the mapped M68K_PC; every other register/flag through
+						// the regmap.
+						bool case_state_ok = true;
+						std::uint32_t au_pc = 0;
+						const bool has_au_pc = harness.retired_pc(au_pc);
+
 						for (auto it = final.MemberBegin(); it != final.MemberEnd(); ++it)
 						{
 							const char *name = it->name.GetString();
 							if (!it->value.IsInt() && !it->value.IsUint() && !it->value.IsInt64() && !it->value.IsUint64())
 								continue; // skip "ram"/"prefetch" arrays
-							if (!harness.has_reg(name))
+							const bool is_pc = (std::string(name) == "pc");
+							if (!is_pc && !harness.has_reg(name))
 								continue; // prefetch reconstructed via RAM, not asserted directly
-							std::uint64_t expected = std::uint64_t(it->value.GetInt64());
-							std::uint64_t actual = harness.get_reg(name);
-							if (std::string(name) == "pc")
-								actual += 2;   // m_pc -> corpus prefetch-pointer convention
+							const std::uint64_t expected = std::uint64_t(it->value.GetInt64());
+							// PC from the retired m_au; other registers from the
+							// retirement snapshot (post-instruction, pre-deferred-
+							// exception) when the core provides one, else live.
+							std::uint64_t actual;
+							std::uint64_t snap = 0;
+							if (is_pc && has_au_pc)
+								actual = std::uint64_t(au_pc);
+							else if (harness.snapshot_reg(name, snap))
+								actual = snap;
+							else
+								actual = harness.get_reg(name);
 							if (actual != expected)
 							{
-								case_ok = false;
-								if (strict)
+								case_state_ok = false;
+								if (diag)
 								{
-									INFO("register " << name << " expected=" << expected << " actual=" << actual);
+									++diag_state_by_field[name];
+								}
+								else
+								{
+									INFO("STATE divergence -- register " << name
+											<< " expected=" << expected << " actual=" << actual);
 									REQUIRE(actual == expected);
 								}
 							}
@@ -719,38 +816,78 @@ TEST_CASE("CPU oracle m68000 SingleStepTests", "[cpu][m68000]")
 								const std::uint8_t actual = harness.read_ram(addr);
 								if (int(actual) != int(expected))
 								{
-									case_ok = false;
-									if (strict)
+									case_state_ok = false;
+									if (diag)
+										++diag_state_by_field["ram"];
+									else
 									{
-										INFO("ram[" << addr << "] expected=" << int(expected) << " actual=" << int(actual));
+										INFO("STATE divergence -- ram[" << addr << "] expected="
+												<< int(expected) << " actual=" << int(actual));
 										REQUIRE(int(actual) == int(expected));
 									}
 								}
 							}
 						}
 
-						if (consumed != expected_cycles)
+						if (!case_state_ok)
 						{
-							case_ok = false;
-							if (strict)
+							++state_div;
+							++diag_state_by_file[fname];
+						}
+
+						// --- CYCLE equality (criterion 2: 100% minus allowlist) ---
+						const bool cycle_exempt = m68000_cycle_exempt(fname, test);
+						if (cycle_exempt)
+						{
+							++allowlisted_cycle;
+						}
+						else if (consumed != expected_cycles)
+						{
+							++cycle_div;
+							++diag_cycle_by_file[fname];
+							if (!diag)
 							{
-								INFO("cycles expected=" << expected_cycles << " actual=" << consumed);
+								INFO("CYCLE divergence -- expected=" << expected_cycles
+										<< " actual=" << consumed << " (not on the frozen allowlist)");
 								REQUIRE(consumed == expected_cycles);
 							}
 						}
 
-						if (case_ok)
-							++agree_cases;
 						++total_cases;
 					}
 				}
 			});
 
 	REQUIRE(ran);
-	// The smoke gate: the harness drove every case end-to-end without crashing.
 	REQUIRE(total_cases > 0);
-	const double pct = total_cases ? (100.0 * double(agree_cases) / double(total_cases)) : 0.0;
-	WARN("m68000 oracle: " << fixtures.size() << " fixtures, " << total_cases
-			<< " cases stepped, " << agree_cases << " (" << pct << "%) match the pinned corpus exactly"
-			<< (strict ? " [STRICT]" : " [smoke -- strict gated on CPUORACLE_M68_STRICT until corpus re-pin]"));
+
+	if (strict)
+	{
+		// Reached only if every REQUIRE above passed: 100% state + cycle-minus-
+		// allowlist.  (Currently this mode FAILS on the corpus-provenance residual
+		// documented in the BLOCKER note above -- it is the strict bar that the
+		// owner-ratified residual disposition will make green.)
+		WARN("m68000 oracle [Leg A, STRICT]: " << fixtures.size() << " fixtures, " << total_cases
+				<< " cases checked with strict state + cycle equality; "
+				<< allowlisted_cycle << " cycle-allowlisted case(s) (TAS/TRAPV/address-error)");
+	}
+	else
+	{
+		// Default reporting gate: green, with the exact residual WARNed so it is
+		// auditable (not silent).  state_div / cycle_div quantify the gap to the
+		// strict Leg-A bar; per-field and per-file tallies localise it.
+		const double state_pct = total_cases ? (100.0 * double(total_cases - state_div) / double(total_cases)) : 0.0;
+		WARN("m68000 oracle [Leg A, REPORT]: " << fixtures.size() << " fixtures, " << total_cases
+				<< " cases replayed.  STATE equal in " << (total_cases - state_div) << " ("
+				<< state_pct << "%); non-allowlisted CYCLE divergences=" << cycle_div
+				<< "; cycle-allowlisted (TAS/TRAPV/address-error)=" << allowlisted_cycle
+				<< ".  STRICT gate (CPUORACLE_M68_STRICT=1) is BLOCKED on the corpus-provenance"
+				<< " residual -- see the BLOCKER note in cpuoracle.cpp and the PR body.");
+		for (const auto &kv : diag_state_by_field)
+			WARN("  STATE-FIELD  " << kv.first << " : " << kv.second);
+		for (const auto &kv : diag_state_by_file)
+			WARN("  STATE-FILE  " << kv.first << " : " << kv.second);
+		for (const auto &kv : diag_cycle_by_file)
+			WARN("  CYCLE-FILE  " << kv.first << " : " << kv.second);
+	}
 }

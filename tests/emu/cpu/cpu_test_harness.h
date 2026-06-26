@@ -81,6 +81,26 @@ public:
 	// Seed a core-specific quirk input not exposed through the state
 	// interface (the z80 SCF/CCF "Q" byte).  No-op for cores without one.
 	virtual void oracle_set_quirk_q(uint8_t) { }
+
+	// Read back the retired program counter in the *corpus's* PC convention,
+	// for cores where that differs from what the state interface exports.
+	//
+	// The m68000 corpus encodes PC from MAME's `m_au` ("next prefetch address",
+	// = instruction start + 4), while STATE_GENPC exports `m_pc` (= start + 2);
+	// reading the corpus-convention PC therefore means reading `m_au` directly
+	// rather than the mapped STATE_GENPC register (ADR 0006 blocker #1 / the
+	// close-out's PC read-back adapter).  Returns true and sets `out` when the
+	// core overrides PC read-back; the default returns false, meaning the
+	// harness should compare PC through the normal register map (z80/m6502,
+	// whose state-interface PC already matches their corpus convention).
+	virtual bool oracle_retired_pc(uint32_t &out) const { (void)out; return false; }
+
+	// Read a final register from the retirement snapshot (m68000: the state after
+	// the instruction but before any deferred trace/exception), keyed by the same
+	// state index the register map uses.  Returns true and sets `out` when the core
+	// snapshots that index; false when the harness should read the live device
+	// instead (the default -- z80/m6502 have no deferred-exception skew).
+	virtual bool oracle_snapshot_reg(int state_index, uint64_t &out) const { (void)state_index; (void)out; return false; }
 };
 
 // Describes one CPU core: how to register its driver and how to translate
@@ -145,6 +165,18 @@ public:
 	void set_reg(const std::string &field, uint64_t value);
 	uint64_t get_reg(const std::string &field) const;
 	bool has_reg(const std::string &field) const;
+
+	// Read back the retired PC in the corpus's PC convention for cores that
+	// override it (m68000: `m_au`, not the STATE_GENPC `m_pc`).  Returns true
+	// and sets `out` when the live core overrides PC read-back; false otherwise
+	// (the caller then compares PC through the normal register map).
+	bool retired_pc(uint32_t &out) const;
+
+	// Read a final register by fixture field name from the core's retirement
+	// snapshot (m68000: post-instruction, pre-deferred-exception state).  Returns
+	// true and sets `out` when the core provides a snapshot for that field; false
+	// when the caller should use get_reg() (live device) instead.
+	bool snapshot_reg(const std::string &field, uint64_t &out) const;
 
 	// Reset the cross-instruction quirk state that a SingleStepTests fixture
 	// does not carry (e.g. the z80 HALT latch and pending NMI), so each case

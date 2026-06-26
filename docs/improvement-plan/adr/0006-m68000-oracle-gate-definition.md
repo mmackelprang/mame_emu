@@ -354,18 +354,26 @@ the accuracy invariant by making explicit that the **live interpreter, not any c
 m68000 authority**, and by forbidding "fix the interpreter to match the corpus." Determinism is
 untouched (the oracle harness is single-threaded over a flat-RAM space, per ADR 0001).
 
-## Open questions (for the owner)
+## Open questions — RESOLVED (owner-confirmed, 2026-06-25)
 
-1. **Allowlist granularity** — file-level (whole `4axx.json` for TAS) or case-level (only the
-   address-error cases within a file)? Recommend **case-level** for `re`/`we` (skip the cycle
-   assert only on cases whose transaction log carries an error cycle type, keeping the rest of the
-   file strict) and **file-level** for TAS/TRAPV (the whole opcode is flagged upstream). Builder to
-   confirm once the corpus transaction schema is parsed.
-2. **Does Leg A assert the corpus's per-cycle *bus transaction log*, or only the cycle count?**
-   ADR 0001's z80/m6502 legs assert *count* (len(cycles)) plus final RAM, not the per-cycle bus
-   trace. Recommend the same for m68000 in Phase 1 (count + final state), deferring full
-   transaction-log matching as a possible later ratchet — it adds fidelity but also more
-   provenance-sensitive surface. Owner to confirm count-only is sufficient for the gate.
-3. **CI cost of the full m68000 corpus** (127 files / 317.5k cases ×2 for Leg B in Phase 2). The
-   `CPUORACLE_MAX_FILES` cap already exists for fast local runs; confirm CI runs the **full** set
-   (it should, for a gate) and budget the added minutes.
+All three open questions were confirmed by the owner during the Leg-A close-out and are now baked
+into the implementation (`tests/emu/cpu/cpuoracle.cpp`, `tests/cpuoracle/fetch_vectors.py`,
+`tests/cpuoracle/manifest.json`):
+
+1. **Allowlist granularity — CONFIRMED: case-level for address errors, file-level for TAS/TRAPV.**
+   The fetcher (`fetch_vectors.py` decoder v2) surfaces a per-case `addr_error` marker for any case
+   whose transaction log carries a `re`/`we` (read/write address-error) cycle type; the gate skips
+   the cycle assert **only on those marked cases**, keeping the rest of each file strict. (The
+   address-error cases are spread thinly across 63 opcode files — ~22 k of 55.6 k marked cases per
+   the corpus — so file-level would needlessly exempt hundreds of thousands of valid cases.) `TAS`
+   and `TRAPV` are exempted at **file level** (whole opcode upstream-flagged). State equality is
+   asserted for all of these; only the *cycle* comparison is exempt.
+2. **Leg A assertion depth — CONFIRMED: cycle COUNT + final state only.** Leg A asserts cycle
+   `count` (consumed icount vs the corpus `length`) plus register/flag/RAM final state, matching the
+   z80/m6502 legs. The per-cycle bus transaction log is **not** asserted (the verbose log is dropped
+   at decode time; only `length` + the `addr_error` bit are kept). Full transaction-log matching is
+   deferred as a possible later ratchet.
+3. **CI corpus — CONFIRMED: the gate runs the FULL corpus.** The gate path replays all 127 files /
+   317.5 k cases with no default cap; `CPUORACLE_MAX_FILES` remains only as a local fast-run knob
+   (and is not set in the CI gate). Wiring the full m68000 corpus into the CI `mametests` step is
+   part of boundary D (ADR 0001's last item).

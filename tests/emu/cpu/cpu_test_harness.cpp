@@ -381,31 +381,80 @@ public:
 		// braces).
 		m_count_before_instruction_step = 0;
 
+		// Settle the supervisor/user banking from the just-applied SR.  The state
+		// interface's M68K_SR / GENPC imports do NOT call update_user_super(), so
+		// without this m_sp (the index of the active A7) and the program space keep
+		// a stale value from a prior case -- and a user-mode push would land on the
+		// supervisor stack (m_da[16]) instead of the USP (m_da[15]), or vice versa.
+		// update_user_super() reads m_sr & SR_S and sets m_sp = (S ? 16 : 15) plus
+		// the matching program/opcodes space.  This is a harness-side re-sync of
+		// derived state to the applied SR -- no change to interpreter behaviour.
+		update_user_super();
+
 		const u32 entry_ipc = m_ipc;
 		int consumed = 0;
 
-		// Phase 1 -- run our instruction.  Grant one cycle at a time; the first
-		// grant moves the core off the entry boundary (into m_inst_substate != 0
-		// or a non-first microcode state), and we keep going until the core is
-		// back on a fresh boundary -- that transition is the retirement of our
-		// instruction (the next opcode fetch is pending but has not run).  A
-		// generous guard (the slowest 68000 instruction, a 64-bit-ish MOVEM or
-		// integer divide, is well under 200 cycles) prevents a runaway.
+		// Capture the full architectural state (the register file, SR and the m_au
+		// prefetch pointer) BEFORE each grant.  When a grant finally advances m_ipc
+		// -- the core has dispatched the NEXT thing (next real instruction OR a
+		// deferred exception our instruction scheduled) -- the captured pre-grant
+		// state is our instruction's retirement state: after its final prefetch but
+		// before any deferred exception perturbs SR.S/SR.T, pushes a supervisor
+		// frame, or vectors PC.  This is what the 68000 SingleStepTests corpus
+		// records: state after the instruction and BEFORE the deferred trace
+		// exception a set SR.T schedules (50% of the corpus has SR.T set).  Reading
+		// the retired state from this snapshot rather than the live core (which has
+		// run through the trace handler by the time m_ipc changes) models the trace
+		// away without touching the live interpreter.
+		snapshot_retired();
+		int frozen_consumed = -1;   // cycle count latched at trace dispatch, if any
 		for (int guard = 0; guard < 512; ++guard)
 		{
+			// Refresh the pre-grant snapshot, and latch the cycle count, only while
+			// the core is still executing OUR instruction.  Once the deferred trace
+			// has DISPATCHED (m_inst_state == S_TRACE) we stop: the snapshot keeps
+			// the post-instruction / pre-trace register state, and frozen_consumed
+			// keeps the instruction's own cycle cost (the trace exception's cycles
+			// belong to the exception, which the corpus does not run).  The trace
+			// handler runs over several grants that do NOT change m_ipc (it bumps
+			// m_ipc only when it vectors to the handler's first instruction), so
+			// without this guard the snapshot/cycle count would absorb the trace's
+			// SR.S|T flip, supervisor-frame push, PC vector and ~34 trap cycles.
+			if (m_inst_state == S_TRACE)
+			{
+				if (frozen_consumed < 0)
+					frozen_consumed = consumed;
+			}
+			else
+				snapshot_retired();
 			*m_icountptr = 1;
 			run();
-			// If this step advanced m_ipc, the core has begun the *next*
-			// instruction (execute_run() sets m_ipc = m_pc - 2 at each
-			// instruction start), so any cycles it charged belong to that next
-			// instruction, NOT ours -- break WITHOUT accumulating them.
+			// If this step advanced m_ipc, the core has dispatched the next thing,
+			// so its cycles belong to that, NOT our instruction -- break WITHOUT
+			// accumulating them, keeping the pre-grant snapshot as the retired state.
 			if (m_ipc != entry_ipc)
-				break;   // our instruction retired; the next opcode is decoded
+				break;
 			consumed += 1 - *m_icountptr;
 		}
 
-		return consumed;
+		return frozen_consumed >= 0 ? frozen_consumed : consumed;
 	}
+
+	// Capture the architectural register file + SR + prefetch pointer as the
+	// retirement snapshot (see step_instruction).
+	void snapshot_retired()
+	{
+		for (int i = 0; i < 17; i++)
+			m_snap_da[i] = m_da[i];
+		m_snap_sr = m_sr;
+		m_retired_au = m_au;
+		m_retired_pc = m_pc;
+	}
+
+	// The prefetch pointer / m_pc as of our instruction's retirement (captured in
+	// step_instruction before the next instruction's microcode perturbs them).
+	u32 retired_au() const { return m_retired_au; }
+	u32 retired_genpc() const { return m_retired_pc; }
 
 	// Reset cross-instruction microcode/IRQ state a fixture does not carry, so
 	// each case starts on a clean architectural boundary.  Writing PC re-parks
@@ -441,6 +490,47 @@ public:
 	// oracle_stepper
 	virtual int oracle_step(int budget) override { return step_instruction(budget); }
 	virtual void oracle_prepare_case() override { clear_quirk_state(); }
+
+	// PC read-back adapter (ADR 0006 blocker #1).  The corpus encodes PC from
+	// MAME's m_au -- the "next prefetch address" -- not from STATE_GENPC, which
+	// exports m_pc.  We read the m_au value captured at our instruction's
+	// retirement (retired_au(), snapshotted in step_instruction before the next
+	// instruction's microcode perturbs the live m_au).  m_au is a protected member
+	// of m68000_device, reachable here because this oracle device is a subclass --
+	// so this is a pure harness-side read-back, no shared-core change.
+	virtual bool oracle_retired_pc(u32 &out) const override { out = retired_au(); return true; }
+
+	// Snapshot register read-back (see step_instruction / snapshot_retired).  The
+	// harness reads the m68000 final register state from the retirement snapshot
+	// rather than the live device, so a deferred trace/exception that runs between
+	// our instruction's completion and the m_ipc-change retirement never leaks into
+	// the captured result.  Maps the fixture's state index (the same M68K_* index
+	// the register map uses) to the snapshot register, mirroring the core's
+	// state_add layout (m_da[0..7]=D0-D7, [8..14]=A0-A6, [15]=USP, [16]=SP/SSP).
+	// Returns false for indices it doesn't cover (PC -- handled via retired_au --
+	// and anything unmapped), so the harness falls back to the live read there.
+	virtual bool oracle_snapshot_reg(int state_index, u64 &out) const override
+	{
+		if (state_index >= M68K_D0 && state_index <= M68K_D7)
+			out = m_snap_da[state_index - M68K_D0];
+		else if (state_index >= M68K_A0 && state_index <= M68K_A6)
+			out = m_snap_da[8 + (state_index - M68K_A0)];
+		else if (state_index == M68K_USP)
+			out = m_snap_da[15];
+		else if (state_index == M68K_SP)
+			out = m_snap_da[16];
+		else if (state_index == M68K_SR)
+			out = m_snap_sr & (SR_SR | SR_CCR);
+		else
+			return false;
+		return true;
+	}
+
+private:
+	u32 m_retired_au = 0;
+	u32 m_retired_pc = 0;
+	u32 m_snap_da[17] = { 0 };
+	u16 m_snap_sr = 0;
 };
 
 DECLARE_DEVICE_TYPE(ORACLE_M68000, oracle_m68000_device)
@@ -977,6 +1067,19 @@ uint64_t cpu_test_harness::get_reg(const std::string &field) const
 bool cpu_test_harness::has_reg(const std::string &field) const
 {
 	return m_field_to_index.find(field) != m_field_to_index.end();
+}
+
+bool cpu_test_harness::retired_pc(uint32_t &out) const
+{
+	return m_stepper->oracle_retired_pc(out);
+}
+
+bool cpu_test_harness::snapshot_reg(const std::string &field, uint64_t &out) const
+{
+	auto it = m_field_to_index.find(field);
+	if (it == m_field_to_index.end())
+		return false;
+	return m_stepper->oracle_snapshot_reg(it->second, out);
 }
 
 void cpu_test_harness::write_ram(uint32_t address, uint8_t value)
