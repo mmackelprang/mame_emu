@@ -53,13 +53,14 @@ mame aurail -rompath "<rompath>" -bench 120 -drc     # DRC
 core is interpreter-only today; the `-drc` flag has no m68000 effect. **Baseline
 = ~1615% of realtime on aurail.**
 
-## Acceptance bar (owner to confirm)
+## Acceptance bar (LOCKED 2026-06-26)
 
 The bar is the **overall aurail `-drc` speedup vs this interpreter baseline**:
 
-> **Proposed: `-drc` ≥ 1.3× the interpreter baseline on aurail** (≈ **≥ 2100%**)
+> **ACCEPTED: `-drc` ≥ 1.3× the interpreter baseline on aurail** (≈ **≥ 2100%**)
 > for DRC Increment 1's native-opcode common-path workload, with **monotonic
-> non-regression** as native coverage widens.
+> non-regression** as native coverage widens. (Owner-confirmed; may be ratcheted
+> upward once Increment 1's native opcode coverage is measured.)
 
 Rationale: MAME's mature DRCUML backends typically give large *raw-core* m68000
 speedups, but the whole-machine gain on a real game is Amdahl-limited by the
