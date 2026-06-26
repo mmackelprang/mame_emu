@@ -174,8 +174,8 @@ additive) and must be fixed before commit.
 
 | Boundary | Tasks | What changes here |
 |---|---|---|
-| **K (this doc)** | 1–2 | Cut-line doc + generated DRC descriptor table. **No behavior change.** |
-| L | 3–4 | DRC frontend skeleton + dual-path plumbing, 100% `cfunc_` fallback. |
+| **K** | 1–2 | Cut-line doc + generated DRC descriptor table. **No behavior change.** ✅ shipped. |
+| **L (lit Leg B)** | 3–4 | DRC frontend skeleton (`m68000fe.{cpp,h}`, consumes the K table, no UML emit) + dual-path `execute_run()` with a **100% `cfunc_`** dispatcher (entry block = `UML_CALLC` interpreter-quantum → `UML_EXIT`; no native emission). Lights up oracle **Leg B** (interpreter ≡ DRC, register/flag/RAM/**cycle** exact) on the x64 (`drcbex64`) + C (`drcbec`) backends. Interpreter arm byte-unchanged; `m_isdrc` scoped to plain M68000. ✅ shipped. |
 | M | 5 | First native UML emission for the opcode set above. |
 
 This document is updated when the native set changes (each coverage-widening increment, ADR

@@ -1,9 +1,9 @@
 # Phase 2 — m68000 → DRCUML port (Pick 2)
 
-> **Status:** In progress — **PR boundary K shipped** (Tasks 1–2) · **boundary L in flight** (Tasks 3–4) · **Consumes:** ADR [0002](../adr/0002-m68000-drcuml-port.md)
+> **Status:** In progress — **PR boundaries K + L shipped** (Tasks 1–4) · **Consumes:** ADR [0002](../adr/0002-m68000-drcuml-port.md)
 > **Hard gate:** ADR [0001](../adr/0001-differential-cpu-oracle.md) — the m68000 oracle
 > **Spec:** [`../specs/2026-06-24-mame-improvements-design.md`](../specs/2026-06-24-mame-improvements-design.md)
-> **Date:** 2026-06-24 · **Last updated:** 2026-06-26 (boundary L claimed)
+> **Date:** 2026-06-24 · **Last updated:** 2026-06-26 (boundary L shipped — Leg B lit up, dual-leg cycle-exact on x64 + C backends)
 
 ## Goal
 
@@ -116,7 +116,7 @@ PR, but `./mame -validate` and the interpreter leg must remain green.)
 > (`mametests "[m68000]"`) is **green** (317,885 assertions). Cut line captured in
 > `src/devices/cpu/m68000/README-drc.md`. **Boundary L is next.**
 
-### Task 3 — DRC frontend skeleton (`m68000fe.{cpp,h}`) — block walk, no UML emit 🚀 IN FLIGHT (PR boundary L)
+### Task 3 — DRC frontend skeleton (`m68000fe.{cpp,h}`) — block walk, no UML emit ✅ DONE (PR boundary L)
 
 - **Files (new):** `src/devices/cpu/m68000/m68000fe.cpp`, `m68000fe.h`.
 - **Files (edit):** `scripts/src/cpu.lua` (M680X0 `files {}` block ~:2116-2143).
@@ -131,7 +131,7 @@ PR, but `./mame -validate` and the interpreter leg must remain green.)
   the expected opcode boundaries on a small fixture. **The interpreter oracle is untouched
   and stays green** (`./mametests "[m68000]"`). `./mame -validate` green. `srcclean`.
 
-### Task 4 — DRC device state + `execute_run` branch (still interpreting) 🚀 IN FLIGHT (PR boundary L)
+### Task 4 — DRC device state + `execute_run` branch (still interpreting) ✅ DONE (PR boundary L)
 
 - **Files (edit):** `src/devices/cpu/m68000/m68000.cpp` (add the `m_isdrc` top-level branch
   in `execute_run()` at :147; the existing microcode loop becomes the interpreter arm),
@@ -154,6 +154,24 @@ PR, but `./mame -validate` and the interpreter leg must remain green.)
 > fallback. **This is the riskiest plumbing PR** — it activates the interpreter≡DRC oracle
 > leg with zero native code, so any future native opcode regresses against a green
 > baseline. Validate on all three backends here (Task 8 matrix) before merging.
+> **✅ Shipped.** New `m68000fe.{cpp,h}` decode frontend consumes the boundary-K descriptor
+> table (`s_drc_desc_table[]`) — no UML emit. `m68000.cpp` gains the dual-path
+> `execute_run()` (`if (m_isdrc) execute_run_drc(); else execute_run_interpreter();`); the
+> interpreter arm is the original microcode loop extracted **byte-for-byte verbatim**. The
+> DRC arm is a **100% `cfunc_` dispatcher**: the compiled entry block does nothing but
+> `UML_CALLC` a C function that runs the interpreter for the granted quantum, then
+> `UML_EXIT(EXECUTE_OUT_OF_CYCLES)` — no native opcode emission, no register/EA mapping
+> (`code_compile_block` is dormant; it exercises the frontend on a real-but-unreached path).
+> `m_isdrc` is latched `allow_drc() && type()==M68000` (scoped to plain 68000; the oracle
+> device opts in). The DRC cache/UML state is allocated **only** for DRC-capable types
+> (m68008/MCU variants do not allocate). **Oracle Leg B is wired and green:** a new
+> `[cpu][m68000][drc]` case runs the full corpus through interpreter **and** DRC and asserts
+> register/flag/RAM/**cycle** equality across **317,500 cases** on **drcbex64 (x64)** and
+> **drcbec (C, via `CPUORACLE_M68_DRC_C=1` → `OPTION_DRC_USE_C`)** — non-vacuously (it
+> `REQUIRE`s the DRC actually engaged and that cycles are compared). Leg A unchanged
+> (317,885 assertions). **arm64 (drcbearm64) deferred to the appserver/CI matrix.**
+> Invocation: `./mametests "[m68000]"` (Leg A) · `./mametests "[m68000][drc]"` (Leg B x64) ·
+> `CPUORACLE_M68_DRC_C=1 ./mametests "[m68000][drc]"` (Leg B C backend). **Boundary M is next.**
 
 ### Task 5 — `m68000drc.cpp`: emit native UML for the common-path opcode set
 
@@ -263,7 +281,7 @@ PR, but `./mame -validate` and the interpreter leg must remain green.)
 | PR | Tasks | Theme | Gate |
 |---|---|---|---|
 | K ✅ | 1–2 | Gate check + generator descriptor extension | oracle green (decode unchanged) — **shipped (PR #22, boundary K)** |
-| L 🚀 | 3–4 | Frontend skeleton + dual-path plumbing (100% `cfunc_`) | dual-leg oracle (full fallback) — **in flight (`feat/m68000-drc-boundary-l`)** |
+| L ✅ | 3–4 | Frontend skeleton + dual-path plumbing (100% `cfunc_`) | dual-leg oracle (full fallback) — **shipped (boundary L): Leg B lit up, interpreter ≡ DRC cycle-exact on x64 (drcbex64) + C (drcbec); arm64 deferred to CI** |
 | M | 5 | Native UML for the common-path opcode set | dual-leg oracle, cycle-exact |
 | N | 6–7 | Native-coverage assertion + throughput bar | coverage + speedup ≥ bar |
 | (matrix) | 8 | x64 / C / arm64 backends | dual-leg oracle per backend |
