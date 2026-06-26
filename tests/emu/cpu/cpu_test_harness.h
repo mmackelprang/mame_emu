@@ -116,6 +116,12 @@ public:
 	// exhausted without reaching the next instruction) -- the m68000 self-branch
 	// signature.  Default false (z80/m6502 always retire cleanly).
 	virtual bool oracle_did_not_retire() const { return false; }
+
+	// True iff the live device is actually running in DRC mode (its m_isdrc latch
+	// is set).  Overridden by oracle_m68000_device to expose the m68000's live
+	// m_isdrc, so Leg B can REQUIRE the DRC really engaged (anti-vacuity guard).
+	// Default false (cores without a DRC arm, or DRC off).
+	virtual bool oracle_is_drc() const { return false; }
 };
 
 // Describes one CPU core: how to register its driver and how to translate
@@ -171,6 +177,18 @@ public:
 	//
 	// Returns true if the machine started and `body` ran.
 	bool run_with_machine(const std::function<void ()> &body);
+
+	// Request that the machine boot with the DRC enabled (OPTION_DRC) or disabled.
+	// Call BEFORE run_with_machine().  Default false preserves Leg A exactly (the
+	// interpreter arm).  When enabled, the m68000 oracle device latches m_isdrc
+	// from allow_drc(); drc_engaged() reports whether it actually engaged.
+	void set_drc(bool enable);
+
+	// True iff the live oracle device is actually running in DRC mode.  Used by
+	// Leg B's anti-vacuity guard (REQUIRE the DRC really engaged on the DRC harness,
+	// and REQUIRE it did NOT on the interpreter harness).  Valid only while the
+	// machine is alive (inside run_with_machine's body).
+	bool drc_engaged() const;
 
 	// Reset the CPU to a clean, between-instructions boundary.
 	void reset_cpu();
@@ -251,6 +269,7 @@ private:
 	std::unique_ptr<running_machine>  m_machine;
 
 	cpu_device *m_cpu = nullptr;
+	bool        m_drc = false;          // request DRC (OPTION_DRC) on the next run_with_machine
 };
 
 //**************************************************************************
