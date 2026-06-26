@@ -10,6 +10,11 @@
       "sha256": "24e84fe045910be3c7ca717f8e6523dfa57cc07595932670a7369e13721e9459",
       "archive_member_prefix": "z80-1.0-beta.2/v1/",
       "expected_file_count": 1604,
+      "provenance": {
+        "derived_from": "independent",
+        "not_independent": false,
+        "note": "Independently derived (not MAME-generated); strict state + cycle equality is meaningful and required. This corpus caught two real MAME z80 WZ/MEMPTR bugs (now fixed)."
+      },
       "mirrors": [
         "https://codeload.github.com/SingleStepTests/z80/tar.gz/refs/tags/v1.0-beta.2",
         "https://github.com/SingleStepTests/z80/archive/refs/tags/v1.0-beta.2.tar.gz"
@@ -22,6 +27,11 @@
       "sha256": "8638717531e8e67d9bbffc18300f4aa955482426b096b72af95d721f9437a857",
       "archive_member_prefix": "65x02-2f6980a2d95757486c7bee24355c360e40e2a224/6502/v1/",
       "expected_file_count": 256,
+      "provenance": {
+        "derived_from": "independent",
+        "not_independent": false,
+        "note": "Independently derived (not MAME-generated); strict state + cycle equality is meaningful and required. Three unstable/illegal opcodes (8b ANE, ab LXA, bb LAS) surfaced as MAME-vs-corpus findings; 12 JAM opcodes never retire. Evidence-based skip list lives in cpuoracle.cpp."
+      },
       "mirrors": [
         "https://codeload.github.com/SingleStepTests/65x02/tar.gz/2f6980a2d95757486c7bee24355c360e40e2a224",
         "https://github.com/SingleStepTests/65x02/archive/2f6980a2d95757486c7bee24355c360e40e2a224.tar.gz"
@@ -33,7 +43,23 @@
       "ref_commit": "64b253116a3de04aaac4346c43680960dc9b67e5",
       "sha256": "6feef5467b764596bc03a84cd6a2be786e6a00f4ccb08d44322ff2bf3e0adb51",
       "archive_member_prefix": "m68000-64b253116a3de04aaac4346c43680960dc9b67e5/v1/",
+      "format": "m68000_bin",
+      "decoder_version": 2,
       "expected_file_count": 127,
+      "provenance": {
+        "derived_from": "MAME microcoded m68000 core",
+        "not_independent": true,
+        "snapshot_date": "2024-08-01",
+        "generator_mame_revision": "unknown (undocumented upstream; ~2024-vintage)",
+        "upstream_status": "Generated using the microcoded core in MAME; any bugs that exist in MAME's microcoded M68000 emulator will exist here too. All tests except TAS and TRAPV are verified as good. TAS doesn't properly handle the special 5-cycle TAS read-modify-write timing; TRAPV appears to trigger incorrectly based on the S bit. Address-error cases carry re/we cycle types where AS isn't asserted and results aren't committed.",
+        "authority": "ADR 0006: the in-tree interpreter (-drc 0), NOT this corpus, is the m68000 behavioral authority. The corpus is a conformance probe. This is a deliberate asymmetry from z80/m6502 (which are independent), justified by provenance.",
+        "cycle_divergence_allowlist": {
+          "single_source": "tests/emu/cpu/cpuoracle.cpp (k_m68000_cycle_allowlist_files + addr_error case marker)",
+          "files": ["TAS.json", "TRAPV.json"],
+          "case_level": "any case with the fetcher's addr_error marker (re/we address-error transaction)",
+          "rationale": "TAS/TRAPV are upstream-STATUS-flagged corpus-generation issues; address-error cases don't commit a comparable cycle count. State is asserted for all of these; only the cycle comparison is exempt (ADR 0006 Leg A)."
+        }
+      },
       "mirrors": [
         "https://codeload.github.com/SingleStepTests/m68000/tar.gz/64b253116a3de04aaac4346c43680960dc9b67e5",
         "https://github.com/SingleStepTests/m68000/archive/64b253116a3de04aaac4346c43680960dc9b67e5.tar.gz"

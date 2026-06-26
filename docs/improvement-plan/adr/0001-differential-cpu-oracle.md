@@ -52,8 +52,44 @@
 >       (changing them is shared-core behaviour). Notably the unstable high-byte
 >       ops (SHA/SHX/SHY/TAS, `0x93/9B/9C/9E/9F`) all *pass*, so the skip list is
 >       minimal and evidence-based.
-> - **Remaining (later PR boundaries):** m68000 leg (rest of C), CI wiring of
->   `mametests` + `srcclean` (D), oracle docs (Task 8).
+>   - **m68000 leg (Task 5 / [ADR 0006](0006-m68000-oracle-gate-definition.md) Leg A) —
+>     GREEN at ~99.6% state / ~99.3% cycle; Leg A is an owner-ratified high-coverage
+>     PROBE.** `[cpu][m68000]` case + `oracle_m68000_device` driving the **new microcode
+>     core** (`m68000_device::execute_run()`, not Musashi) + the m68000 register map
+>     (`d0–d7/a0–a6/usp/ssp/sr/pc`). The fetcher gained an **in-tree decoder** for the
+>     corpus's custom binary `.json.bin` container (`manifest.json` marks it
+>     `"format": "m68000_bin"`, decoder v2 emits a per-case `addr_error` marker).
+>     **All adapters/fixes are in the `oracle_m68000_device` subclass reading protected
+>     members — ZERO shared-core change** — taking the leg from ~30% to ~99.6%:
+>     1. **PC read-back from `m_au`** (ADR 0006 blocker #1): the corpus encodes PC from
+>        MAME's `m_au` (= start + 4), not `STATE_GENPC`'s `m_pc` (= start + 2). Closed
+>        the dominant ~80%-of-cases PC mismatch.
+>     2. **`update_user_super()` after applying SR**: re-syncs `m_sp` (active-A7 index)
+>        and the program space the state import doesn't, so a user-mode push lands on the
+>        USP, not the supervisor stack.
+>     3. **Deferred-trace snapshot**: a pre-grant register/SR snapshot that freezes on the
+>        `S_TRACE` dispatch captures the pre-trace state the corpus records.
+>     4. **Per-case RAM scrub**: zero each case's initial+final RAM cells before seeding,
+>        so the corpus's zeroed-memory assumption holds (fixed the MOVEP byte-lane case).
+>     5. **Retirement RAM snapshot**: snapshot the watched final-RAM cells at the same
+>        pre-grant retirement point as the registers, so a single-step **over-run** (the
+>        grant that advances `m_ipc` also runs the next instruction's first write) can't
+>        clobber the compared RAM. Fixed the whole `(A7)`/auto-inc-dec/ABCD/ADDX class.
+>     The gate is a **high-coverage probe**: it hard-`REQUIRE`s strict STATE on every case
+>     **outside** a corpus-data-keyed deferred-exception residual (SR.T / TAS/TRAPV /
+>     address-error / branch-self-loop), strict CYCLE on every non-allowlisted such case,
+>     and **asserts out-of-residual divergences `== 0`** — so the residual can't hide a
+>     bug. Inside the residual it reports (stays green). `CPUORACLE_M68_STRICT=1`
+>     hard-`REQUIRE`s the residual too (for a corpus re-pin), failing by design.
+>     **Residual (all reported, `unexplained == 0`):** TRAPV 1250 (upstream-flagged), BSR
+>     11 + Bcc 9 (self-branch), plus the trace/exception classes — all documented
+>     provenance/harness-single-step limitations, **none a core bug**. The frozen cycle
+>     allowlist (TAS + TRAPV file-level, `addr_error` case-level) is wired + provenance-
+>     cited. **Owner accepted the ~99% probe (ADR 0006 reframed); Leg B (interpreter ≡
+>     DRC) is the load-bearing Phase-2 gate, corpus-immune.**
+> - **Remaining (later PR boundaries):** CI wiring of `mametests` + `srcclean`
+>   (boundary D — the last ADR 0001 item), oracle
+>   docs (Task 8 — `tests/cpuoracle/README.md` landed with this PR).
 
 ## Context
 

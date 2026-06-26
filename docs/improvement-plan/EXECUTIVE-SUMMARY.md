@@ -14,7 +14,7 @@ dependency-ordered phases.
 
 | Phase | Pick / ADR | Theme | Status |
 |---|---|---|---|
-| **P1** | Pick 1 / ADR 0001 — Differential CPU oracle | Correctness safety net | z80 ✅ · m6502 ✅ · m68000 infra done, gate redefined ([ADR 0006](adr/0006-m68000-oracle-gate-definition.md)) · CI-wiring pending |
+| **P1** | Pick 1 / ADR 0001 — Differential CPU oracle | Correctness safety net | z80 ✅ · m6502 ✅ · m68000 ✅ Leg-A probe ~99.6% state / ~99.3% cycle ([ADR 0006](adr/0006-m68000-oracle-gate-definition.md); Leg B = the Phase-2 gate) · CI-wiring (boundary D) pending |
 | **P1** | Pick 3 / ADR 0003 — Front-end usability | End-user UX | **✅ Done** (PRs #3 / #4 / #5) |
 | **P1** | Pick 5 / ADR 0005 — Build/list friction | Developer experience | **✅ Done** (PRs #2 / #6 / #7) |
 | **P2** | Pick 2 / ADR 0002 — m68000 → DRCUML | **Runtime performance** | Designed, **not started** (hard-gated on the m68000 oracle) |

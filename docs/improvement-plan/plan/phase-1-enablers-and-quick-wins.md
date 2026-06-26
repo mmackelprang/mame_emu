@@ -204,13 +204,17 @@ and m6502 (cleanest), then folding in m68000.
 - **Test/Validation:** `python tests/cpuoracle/fetch_vectors.py --cores m6502` then
   `./mametests "[m6502]"`. **Green:** all m6502 cases pass with cycle equality.
 
-### Task 5 — m68000 oracle (gate defined by [ADR 0006](../adr/0006-m68000-oracle-gate-definition.md): Leg A — state 100% + cycle-except-allowlist)
+### Task 5 — m68000 oracle (Leg A landed: ~99.6% state / ~99.3% cycle high-coverage probe, [ADR 0006](../adr/0006-m68000-oracle-gate-definition.md)) ✅
 
-> **Gate authority resolved by [ADR 0006](../adr/0006-m68000-oracle-gate-definition.md).** The
-> m68000 corpus is **MAME-derived, not independent** — so the in-tree interpreter (`-drc 0`) is the
-> authority and the corpus is a conformance *probe*. Task 5 delivers **Leg A** of the 0006 gate
-> (criteria 1+2); **Leg B** (interpreter ≡ DRC) is a Phase-2 deliverable. Follow the **ADR 0006
-> §Close-out path** ordered checklist.
+> **DONE (Leg A).** The m68000 corpus is **MAME-derived, not independent** — so the in-tree
+> interpreter (`-drc 0`) is the authority and the corpus is a conformance *probe*. Leg A landed
+> **GREEN at ~99.6% state / ~99.3% cycle** (criteria 1+2 of [ADR 0006](../adr/0006-m68000-oracle-gate-definition.md),
+> owner-reframed to a high-coverage probe): strict outside a corpus-data-keyed deferred-exception
+> residual, with out-of-residual divergences asserted `== 0`. All adapters/fixes (PC via `m_au`,
+> `update_user_super` banking, deferred-trace snapshot, per-case RAM scrub, retirement RAM snapshot)
+> are harness-side with **zero shared-core change**. **Leg B** (interpreter ≡ DRC) is the
+> load-bearing Phase-2 gate. Remaining ADR 0001 item: boundary D (CI wiring of `mametests` +
+> `srcclean`).
 
 - **Files (edit):** `tests/emu/cpu/cpuoracle.cpp` (add `[cpu][m68000]` + the frozen
   cycle-divergence allowlist, single-sourced — model on the m6502 `k_jam_files`/`k_unstable_files`

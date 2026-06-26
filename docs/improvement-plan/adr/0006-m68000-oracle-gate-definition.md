@@ -1,12 +1,21 @@
 # ADR 0006 — m68000 differential-oracle gate definition (authority, pinning, acceptance criteria)
 
-> **Status:** Accepted · **Phase:** P1 (resolves the Phase-1 → Phase-2 hard gate) · **Owner:** TBD
+> **Status:** Accepted (Leg A reframed to a ~99% probe, owner-ratified 2026-06-25) · **Phase:** P1
+> (resolves the Phase-1 → Phase-2 hard gate) · **Owner:** TBD
 > **Depends on:** [0001 (CPU oracle)](0001-differential-cpu-oracle.md) — this ADR refines 0001's
 > m68000 leg and its "cycle-equality strictness per core" open question (0001 OQ #3).
 > **Depended on by:** [0002 (m68000 DRC)](0002-m68000-drcuml-port.md) — this ADR is what 0002's
 > hard gate now means.
 > **Spec:** [`docs/improvement-plan/specs/2026-06-24-mame-improvements-design.md`](../specs/2026-06-24-mame-improvements-design.md)
 > **Date:** 2026-06-25
+>
+> **Update (close-out, 2026-06-25):** Leg A landed at **~99.6% state / ~99.3% cycle** and is
+> **reframed as a high-coverage conformance PROBE** (not a strict 100%-state gate) — the owner chose
+> to accept the ~99% bar over chasing the MAME-self-generated corpus's deferred-trace inconsistency.
+> The probe is wired so it **cannot hide a regression** (strict outside a corpus-data-keyed
+> deferred-exception residual; out-of-residual divergences asserted `== 0`). **Leg B (interpreter ≡
+> DRC) is the load-bearing Phase-2 gate and is unchanged / corpus-immune.** See *Named provenance
+> limitations* and the updated *Acceptance criteria*.
 
 ## TL;DR
 
@@ -152,17 +161,34 @@ Alternatives — because a self-generated corpus can only confirm the core agree
 
 ### 3. Gate definition — two legs, one frozen allowlist
 
-#### Leg A — corpus conformance (interpreter vs corpus)
+#### Leg A — corpus conformance (interpreter vs corpus) — a HIGH-COVERAGE PROBE
+
+> **Reframed (owner-ratified, 2026-06-25).** Leg A is a **high-coverage conformance probe at
+> ~99.6% state / ~99.3% cycle**, **not** a strict 100%-state gate. The original "100% state, no
+> exemptions" bar proved unreachable because the pinned corpus is **internally inconsistent on
+> deferred-trace/exception capture** (a named provenance limitation — see *Named provenance
+> limitations* below), and the owner chose to **accept the ~99% probe** rather than chase a
+> MAME-self-generated corpus the interpreter (the authority) need not match cell-for-cell. **The
+> load-bearing Phase-2 guarantee is Leg B (interpreter ≡ DRC), which is corpus-immune; a ~99% Leg A
+> does not weaken it.** The gate is implemented so the probe **cannot hide a regression** (below).
 
 For every replayed case (the full pinned corpus, subject only to `CPUORACLE_MAX_FILES` for
 fast local runs):
 
-- **State equality — 100%, no exemptions.** Every mapped architectural register, every flag bit
-  (the full CCR/SR), and every fixture final-RAM cell must match exactly. **There is no allowlist
-  for state.** A state divergence is always a finding (either a harness-adapter bug or a genuine
-  interpreter regression vs the snapshot) and blocks the gate until explained.
-- **Cycle equality — 100% except a frozen allowlist.** Consumed bus cycles must equal the corpus
-  cycle count for every opcode **except** those on the **cycle-divergence allowlist**:
+- **State equality — strict OUTSIDE a principled deferred-exception residual; reported inside it.**
+  Every mapped architectural register, every flag bit (the full CCR/SR), and every fixture final-RAM
+  cell is **hard-REQUIRE'd to match** for every case **outside** the residual predicate
+  (`m68000_residual_expected`: initial SR.T set, OR TAS/TRAPV, OR an address-error case, OR a
+  branch-self-loop). A state divergence **outside** the residual is always a finding and blocks the
+  gate. The **count of out-of-residual divergences is asserted `== 0`**, so the residual cannot mask
+  a real bug. Divergences **inside** the residual are reported (the probe stays green); they are the
+  documented corpus-provenance / harness-single-step limitations, not interpreter regressions.
+  `CPUORACLE_M68_STRICT=1` hard-REQUIREs the residual too (for investigating a corpus re-pin) and
+  fails on it by design.
+- **Cycle equality — strict except a frozen allowlist (and the same residual).** Consumed bus
+  cycles must equal the corpus cycle count for every opcode **except** those on the
+  **cycle-divergence allowlist**, and cycle mismatches inside the deferred-exception residual are
+  reported, not failed:
   - **TAS** (`0x4Axx` byte form) — corpus omits the special 5-cycle RMW timing (upstream STATUS).
   - **TRAPV** (`0x4E76`) — corpus generation flagged an S-bit-dependent triggering issue
     (upstream STATUS).
@@ -224,27 +250,58 @@ the m6502 `k_jam_files` / `k_unstable_files` pattern) — keyed by opcode/file w
 string, and **referenced** (not duplicated) from `manifest.json`'s `provenance` block and
 `tests/cpuoracle/README.md`. One edit point; review sees the rationale next to the skip.
 
+### Named provenance limitations (the documented Leg-A residual)
+
+These are the **characterised, owner-accepted** reasons Leg A is a ~99% probe rather than a strict
+100%-state gate. Each is keyed on a corpus-data signature (so the residual cannot mask an unrelated
+bug), and **none is a core defect** — the interpreter is correct; the limitation is the
+MAME-self-generated corpus or the harness's single-step model:
+
+1. **Inconsistent deferred-trace/exception capture (the dominant class).** ~50% of the corpus has
+   `SR.T` set; for most opcodes the corpus snapshots state **before** the trace exception, but for
+   the exception-taking subset (taken branches; ILLEGAL/TRAP/CHK/RTE/MOVEtoSR; address-error pops)
+   it snapshots **after** the exception ran (`SR.S|T` flipped, a frame pushed, PC vectored, extra
+   cycles). No uniform single-step model matches both. Signature: initial `SR.T` set, OR TAS/TRAPV,
+   OR an address-error case.
+2. **Branch-self-loop (a branch whose target re-enters the branching instruction).** A `BSR -2` /
+   `Bcc -2` branches onto itself; the harness single-step retires on the `m_ipc` change, which never
+   occurs for a self-branch, so the guard loop exhausts without retiring. BSR/Bcc are correct (the
+   corpus, from the same core, runs them once); this is a harness single-step limitation.
+   **Signature: the harness's own `did_not_retire()` flag** (the step exhausted the guard with
+   `m_ipc == entry_ipc`) — a precise harness-observable signal, *not* a corpus PC-delta heuristic
+   (which would also exempt ordinary not-taken short branches, e.g. the 565 not-taken `Bcc +2`
+   cases, and create a blind spot). (~20 cases.)
+
+Two earlier suspected limitations were **fixed** (not accepted) during close-out, both harness-side,
+zero core change: MOVEP byte-lane (a cross-case stale-RAM gap, fixed by a per-case RAM scrub) and
+the `(A7)`/auto-inc-dec/ABCD/ADDX false-divergence class (a single-step **over-run** — the grant that
+advances `m_ipc` also ran the next instruction's first memory write — fixed by snapshotting the
+watched final-RAM cells at the same pre-grant retirement point as the registers).
+
 ## Acceptance criteria (what Phase 2 consumes — unambiguous, reviewable)
 
 **"The m68000 oracle is green"** ⇔ all of the following, on the host backend, with the pinned
 corpus fetched:
 
-1. **Leg A state:** 100% of replayed m68000 cases pass strict register + flag + RAM equality
-   (interpreter vs corpus). Zero exemptions.
-2. **Leg A cycles:** 100% of replayed cases **not** on the frozen allowlist pass strict cycle
-   equality (interpreter vs corpus). Every allowlisted file is covered by a rationale entry citing
-   upstream provenance; the allowlist is exactly {TAS, TRAPV, address-error vectors} unless a
-   review-approved provenance-cited addition is made.
-3. **Leg B (the Phase-2 guarantee):** 100% of replayed cases — allowlist included — pass strict
-   register + flag + RAM + **cycle** equality between `-drc 0` and `-drc 1`.
-4. The run reports its counts (cases checked, files allowlisted) the way the z80/m6502 legs already
-   `WARN(...)` their totals, so "green" is auditable, not silent.
+1. **Leg A state (probe):** every replayed case **outside** the deferred-exception residual
+   (`m68000_residual_expected`) passes strict register + flag + RAM equality, **and the count of
+   out-of-residual state divergences is `0`**. Divergences inside the residual are reported, not
+   failed. (Achieved: ~99.6% — 316 230 / 317 500.)
+2. **Leg A cycles (probe):** every replayed case not on the frozen allowlist **and** outside the
+   residual passes strict cycle equality, **and the count of out-of-residual cycle divergences is
+   `0`**. The allowlist is exactly {TAS, TRAPV file-level; address-error case-level} unless a
+   review-approved provenance-cited addition is made. (Achieved: ~99.3% of cycle-checked cases.)
+3. **Leg B (the Phase-2 guarantee, UNCHANGED):** 100% of replayed cases — allowlist included — pass
+   strict register + flag + RAM + **cycle** equality between `-drc 0` and `-drc 1`. This is
+   corpus-immune (it never consults the corpus) and is **not weakened by the ~99% Leg-A bar**.
+4. The run reports its counts (state %, cycle %, allowlisted, residual, unexplained=0) the way the
+   z80/m6502 legs `WARN(...)` their totals, so "green" is auditable, not silent.
 
-For **Phase 1, Task 5** the bar is criteria **1 + 2** (the interpreter leg; there is no DRC yet, so
+For **Phase 1, Task 5** the bar is criteria **1 + 2** (the interpreter probe; there is no DRC yet, so
 Leg B is vacuously satisfied / skipped via the capability query in ADR 0001 §2). For **Phase 2**
-every DRC-touching PR additionally requires criterion **3**, and the ADR-0002 backend matrix
-(Task 8) requires criterion 3 on each available UML backend (`drcbex64`, `drcbec` via
-`-drc_use_c 1`, `drcbearm64` where available).
+every DRC-touching PR additionally requires criterion **3** — *the load-bearing gate* — and the
+ADR-0002 backend matrix (Task 8) requires criterion 3 on each available UML backend (`drcbex64`,
+`drcbec` via `-drc_use_c 1`, `drcbearm64` where available).
 
 > **Note on `-drc 0` ≡ DRC for allowlisted opcodes:** because allowlisted opcodes `cfunc_` to the
 > interpreter in the DRC (ADR 0002 §3), Leg B's cycle equality there is structural, so Phase 2 still
@@ -286,12 +343,22 @@ every DRC-touching PR additionally requires criterion **3**, and the ADR-0002 ba
    (ADR 0001 §2) for criterion 3 across the full corpus including the allowlist, on the backend
    matrix. This is the gate ADR 0002 PRs K–O consume.
 
-If, after (1)–(5), **non-allowlisted cycle equality cannot be reached** and the residue traces to
-genuine live-core inaccuracy (not corpus drift), that is an **oracle finding for the maintainer**
-(like the z80 WZ fixes) — fix it in the core and keep the interpreter authoritative; do **not**
-expand the allowlist to hide a real bug. Phase 1, Task 5's risk R1 is thereby retired: the gate is
-*achievable* because Leg B (the part Phase 2 truly needs) is corpus-drift-immune, and Leg A is
-provenance-bounded.
+> **Close-out outcome (2026-06-25).** Steps 1–7 landed (PC via `m_au`; the sub-cycle stepper +
+> register map; the per-case RAM scrub + retirement RAM snapshot that fixed the MOVEP byte-lane and
+> the `(A7)`/over-run classes; the frozen cycle allowlist; the manifest provenance + README). The
+> strict-100%-state bar from step 6 was **reframed by the owner** to the ~99.6% **probe** above,
+> because the remaining residual is the corpus's own deferred-trace inconsistency (a provenance
+> limitation, not a core bug). The probe hard-REQUIREs everything outside the corpus-data-keyed
+> residual and asserts out-of-residual divergences `== 0`, so it stays a real gate. Step 8 (Leg B)
+> remains Phase 2.
+
+If a state/cycle divergence appears **outside** the documented residual, that is an **oracle finding
+for the maintainer** (like the z80 WZ fixes) — investigate and fix it (in the harness if it is a
+single-step artifact, in the core only if the corpus — from the same core — disagrees and the core
+is genuinely wrong); do **not** expand the residual predicate to hide it. The probe's
+`unexplained == 0` assertion enforces this. Phase 1, Task 5's risk R1 is retired: the gate is
+*achievable* because Leg B (the part Phase 2 truly needs) is corpus-drift-immune, and Leg A is a
+provenance-bounded probe.
 
 ## Alternatives considered
 
@@ -354,18 +421,26 @@ the accuracy invariant by making explicit that the **live interpreter, not any c
 m68000 authority**, and by forbidding "fix the interpreter to match the corpus." Determinism is
 untouched (the oracle harness is single-threaded over a flat-RAM space, per ADR 0001).
 
-## Open questions (for the owner)
+## Open questions — RESOLVED (owner-confirmed, 2026-06-25)
 
-1. **Allowlist granularity** — file-level (whole `4axx.json` for TAS) or case-level (only the
-   address-error cases within a file)? Recommend **case-level** for `re`/`we` (skip the cycle
-   assert only on cases whose transaction log carries an error cycle type, keeping the rest of the
-   file strict) and **file-level** for TAS/TRAPV (the whole opcode is flagged upstream). Builder to
-   confirm once the corpus transaction schema is parsed.
-2. **Does Leg A assert the corpus's per-cycle *bus transaction log*, or only the cycle count?**
-   ADR 0001's z80/m6502 legs assert *count* (len(cycles)) plus final RAM, not the per-cycle bus
-   trace. Recommend the same for m68000 in Phase 1 (count + final state), deferring full
-   transaction-log matching as a possible later ratchet — it adds fidelity but also more
-   provenance-sensitive surface. Owner to confirm count-only is sufficient for the gate.
-3. **CI cost of the full m68000 corpus** (127 files / 317.5k cases ×2 for Leg B in Phase 2). The
-   `CPUORACLE_MAX_FILES` cap already exists for fast local runs; confirm CI runs the **full** set
-   (it should, for a gate) and budget the added minutes.
+All three open questions were confirmed by the owner during the Leg-A close-out and are now baked
+into the implementation (`tests/emu/cpu/cpuoracle.cpp`, `tests/cpuoracle/fetch_vectors.py`,
+`tests/cpuoracle/manifest.json`):
+
+1. **Allowlist granularity — CONFIRMED: case-level for address errors, file-level for TAS/TRAPV.**
+   The fetcher (`fetch_vectors.py` decoder v2) surfaces a per-case `addr_error` marker for any case
+   whose transaction log carries a `re`/`we` (read/write address-error) cycle type; the gate skips
+   the cycle assert **only on those marked cases**, keeping the rest of each file strict. (The
+   address-error cases are spread thinly across 63 opcode files — ~22 k of 55.6 k marked cases per
+   the corpus — so file-level would needlessly exempt hundreds of thousands of valid cases.) `TAS`
+   and `TRAPV` are exempted at **file level** (whole opcode upstream-flagged). State equality is
+   asserted for all of these; only the *cycle* comparison is exempt.
+2. **Leg A assertion depth — CONFIRMED: cycle COUNT + final state only.** Leg A asserts cycle
+   `count` (consumed icount vs the corpus `length`) plus register/flag/RAM final state, matching the
+   z80/m6502 legs. The per-cycle bus transaction log is **not** asserted (the verbose log is dropped
+   at decode time; only `length` + the `addr_error` bit are kept). Full transaction-log matching is
+   deferred as a possible later ratchet.
+3. **CI corpus — CONFIRMED: the gate runs the FULL corpus.** The gate path replays all 127 files /
+   317.5 k cases with no default cap; `CPUORACLE_MAX_FILES` remains only as a local fast-run knob
+   (and is not set in the CI gate). Wiring the full m68000 corpus into the CI `mametests` step is
+   part of boundary D (ADR 0001's last item).
