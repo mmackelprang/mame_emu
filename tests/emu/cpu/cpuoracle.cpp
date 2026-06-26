@@ -703,10 +703,11 @@ TEST_CASE("CPU oracle m68000 SingleStepTests", "[cpu][m68000]")
 
 	cpuoracle::cpu_test_harness harness(cpuoracle::m68000_core_descriptor());
 
-	std::size_t total_cases = 0;        // cases whose cycle count was compared (i.e. checked)
+	std::size_t total_cases = 0;        // all replayed cases (state-checked; cycle-checked unless allowlisted)
 	std::size_t allowlisted_cycle = 0;  // cases whose cycle assert was skipped (allowlist)
-	std::size_t state_div = 0;          // diag: cases with a state divergence
-	std::size_t cycle_div = 0;          // diag: non-allowlisted cases with a cycle divergence
+	std::size_t cycle_checked = 0;      // cases whose cycle count was actually compared (total - allowlisted)
+	std::size_t state_div = 0;          // cases with a state divergence
+	std::size_t cycle_div = 0;          // non-allowlisted cases with a cycle divergence
 	std::map<std::string, std::size_t> diag_state_by_file;
 	std::map<std::string, std::size_t> diag_cycle_by_file;
 	std::map<std::string, std::size_t> diag_state_by_field;  // diag: which field diverged
@@ -841,15 +842,19 @@ TEST_CASE("CPU oracle m68000 SingleStepTests", "[cpu][m68000]")
 						{
 							++allowlisted_cycle;
 						}
-						else if (consumed != expected_cycles)
+						else
 						{
-							++cycle_div;
-							++diag_cycle_by_file[fname];
-							if (!diag)
+							++cycle_checked;
+							if (consumed != expected_cycles)
 							{
-								INFO("CYCLE divergence -- expected=" << expected_cycles
-										<< " actual=" << consumed << " (not on the frozen allowlist)");
-								REQUIRE(consumed == expected_cycles);
+								++cycle_div;
+								++diag_cycle_by_file[fname];
+								if (!diag)
+								{
+									INFO("CYCLE divergence -- expected=" << expected_cycles
+											<< " actual=" << consumed << " (not on the frozen allowlist)");
+									REQUIRE(consumed == expected_cycles);
+								}
 							}
 						}
 
@@ -875,14 +880,19 @@ TEST_CASE("CPU oracle m68000 SingleStepTests", "[cpu][m68000]")
 	{
 		// Default reporting gate: green, with the exact residual WARNed so it is
 		// auditable (not silent).  state_div / cycle_div quantify the gap to the
-		// strict Leg-A bar; per-field and per-file tallies localise it.
+		// strict Leg-A bar; per-field and per-file tallies localise it.  The state
+		// rate is over ALL replayed cases (no state allowlist); the cycle rate is
+		// over the cycle-CHECKED cases only (allowlisted ones excluded from both
+		// numerator and denominator).
 		const double state_pct = total_cases ? (100.0 * double(total_cases - state_div) / double(total_cases)) : 0.0;
+		const double cycle_pct = cycle_checked ? (100.0 * double(cycle_checked - cycle_div) / double(cycle_checked)) : 0.0;
 		WARN("m68000 oracle [Leg A, REPORT]: " << fixtures.size() << " fixtures, " << total_cases
-				<< " cases replayed.  STATE equal in " << (total_cases - state_div) << " ("
-				<< state_pct << "%); non-allowlisted CYCLE divergences=" << cycle_div
-				<< "; cycle-allowlisted (TAS/TRAPV/address-error)=" << allowlisted_cycle
-				<< ".  STRICT gate (CPUORACLE_M68_STRICT=1) is BLOCKED on the corpus-provenance"
-				<< " residual -- see the BLOCKER note in cpuoracle.cpp and the PR body.");
+				<< " cases replayed.  STATE equal in " << (total_cases - state_div) << "/" << total_cases
+				<< " (" << state_pct << "%); CYCLE equal in " << (cycle_checked - cycle_div) << "/" << cycle_checked
+				<< " checked (" << cycle_pct << "%), " << allowlisted_cycle
+				<< " cycle-allowlisted (TAS/TRAPV/address-error).  STRICT gate"
+				<< " (CPUORACLE_M68_STRICT=1) is BLOCKED on the corpus-provenance residual"
+				<< " -- see the BLOCKER note in cpuoracle.cpp and the PR body.");
 		for (const auto &kv : diag_state_by_field)
 			WARN("  STATE-FIELD  " << kv.first << " : " << kv.second);
 		for (const auto &kv : diag_state_by_file)

@@ -183,13 +183,21 @@ def _m68k_skip_transactions(content, ptr):
     num_cycles, num_transactions = struct.unpack_from("<II", content, ptr)
     ptr += 8
     addr_error = False
+    # Per-transaction layout (upstream decode.py read_transactions, pinned commit
+    # 64b253116a3de04aaac4346c43680960dc9b67e5): EVERY transaction begins with a
+    # 1-byte type (tw) + a 4-byte cycle-count field (`unpack_from("<BI", ...)`;
+    # ptr += 5) -- INCLUDING idle (tw==0) transactions, which carry no further
+    # payload (upstream `continue`s after the count).  Non-idle transactions add
+    # five u32 (fc, addr_bus, data_bus, UDS, LDS; ptr += 20).  This stride mirrors
+    # the upstream walker exactly; getting the idle stride wrong would desync the
+    # pointer for the rest of the file.
     for _ in range(num_transactions):
         tw = struct.unpack_from("<B", content, ptr)[0]
-        ptr += 5  # type byte + 4-byte cycle count
+        ptr += 5  # 1-byte type + 4-byte cycle count (present for every transaction)
         if tw in (_M68K_TW_READ_ADDR_ERROR, _M68K_TW_WRITE_ADDR_ERROR):
             addr_error = True
         if tw != 0:
-            ptr += 20  # fc, addr, data, UDS, LDS (5 x u32)
+            ptr += 20  # fc, addr, data, UDS, LDS (5 x u32) -- non-idle only
     return ptr, num_cycles, addr_error
 
 
