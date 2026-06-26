@@ -7,6 +7,7 @@ on:
     - '3rdparty/**'
     - 'scripts/**'
     - 'src/**'
+    - 'tests/**'
     - 'COPYING'
     - 'makefile'
   pull_request:
@@ -15,6 +16,7 @@ on:
     - '3rdparty/**'
     - 'scripts/**'
     - 'src/**'
+    - 'tests/**'
     - 'COPYING'
     - 'makefile'
 
@@ -73,9 +75,30 @@ jobs:
         ARCHOPTS: "-fuse-ld=lld"
         SUBTARGET: ${{ matrix.subtarget }}
         TOOLS: 1
+        # TESTS=1 also builds the `mametests` Catch2 binary (legacy unit tests +
+        # the differential CPU oracle), run below (ADR 0001 / 0006).
+        TESTS: 1
       run: make -j3
     - name: Validate
       run: ./${{ matrix.executable }}.exe -validate
+    # --- ADR 0001 boundary D: mametests + the differential CPU oracle ---------
+    # Fetch the pinned, hash-verified SingleStepTests corpus (uses the MSYS2
+    # python installed above).  A fetch failure exits non-zero and fails the leg
+    # loudly (the oracle is never silently skipped in CI).  Primary source is
+    # codeload.github.com with a github.com archive fallback (manifest.json
+    # mirrors[]).
+    - name: Fetch CPU oracle vectors
+      run: python tests/cpuoracle/fetch_vectors.py --cores z80,m6502,m68000
+    # COST CAP (documented, not silent): the MSYS2/MinGW Windows legs are the
+    # slowest, so they run a REPRESENTATIVE SUBSET -- the first 64 fixture files
+    # per core (CPUORACLE_MAX_FILES=64) -- as a cross-platform smoke that the
+    # oracle harness + the test binary behave on Windows.  The FULL-corpus
+    # m68000 gate (ADR 0006 decision #3) runs on Linux (the canonical leg); this
+    # cap never weakens that gate.
+    - name: Run mametests (oracle subset + legacy unit tests)
+      env:
+        CPUORACLE_MAX_FILES: 64
+      run: ./mametests.exe
     - uses: actions/upload-artifact@main
       with:
         name: ${{ matrix.executable }}-windows-${{ matrix.compiler }}-${{ github.sha }}

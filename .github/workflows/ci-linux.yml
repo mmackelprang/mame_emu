@@ -8,6 +8,7 @@ on:
     - 'hash/**'
     - 'scripts/**'
     - 'src/**'
+    - 'tests/**'
     - 'COPYING'
     - 'makefile'
   pull_request:
@@ -17,6 +18,7 @@ on:
     - 'hash/**'
     - 'scripts/**'
     - 'src/**'
+    - 'tests/**'
     - 'COPYING'
     - 'makefile'
 
@@ -64,11 +66,17 @@ jobs:
             archopts: -U_FORTIFY_SOURCE
             subtarget: tiny
             executable: mametiny
+            # gcc leg runs a representative oracle subset (the clang leg below is
+            # the canonical full-corpus gate) -- avoids replaying the full m68000
+            # corpus (317.5k cases) twice per push.
+            oracle_cap: "64"
           - compiler: clang
             cc: clang
             cxx: clang++
             subtarget: mame
             executable: mame
+            # clang leg is the CANONICAL gate: full corpus, no cap (empty == all).
+            oracle_cap: ""
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@main
@@ -88,11 +96,35 @@ jobs:
         ARCHOPTS: ${{ matrix.archopts }}
         SUBTARGET: ${{ matrix.subtarget }}
         TOOLS: 1
+        # TESTS=1 also builds the `mametests` Catch2 binary (the four legacy
+        # unit tests + the differential CPU oracle), run below (ADR 0001 / 0006).
+        TESTS: 1
       run: make -j3
     - name: Validate
       run: ./${{ matrix.executable }} -validate
     - name: Reconcile driver list
       run: ./${{ matrix.executable }} -listxml | python scripts/build/makedep.py reconcilelist -l src/mame/${{ matrix.subtarget }}.lst -
+    # --- ADR 0001 boundary D: mametests + the differential CPU oracle ---------
+    # Fetch the pinned, hash-verified SingleStepTests corpus (z80 + m6502 +
+    # m68000) into the gitignored build/cpuoracle/ cache.  The fetcher pins an
+    # immutable upstream ref + a per-archive SHA-256 and falls back across the
+    # mirrors[] list in manifest.json; CI's primary source is codeload.github.com
+    # (mirror 0), with github.com/.../archive as the fallback.  A fetch failure
+    # exits non-zero and fails the leg LOUDLY -- the oracle is never silently
+    # skipped in CI (the in-harness "skip if fixtures absent" path is for a
+    # developer without the corpus, not for CI).
+    - name: Fetch CPU oracle vectors
+      run: python tests/cpuoracle/fetch_vectors.py --cores z80,m6502,m68000
+    # The clang/mame leg is the CANONICAL oracle gate: it runs the FULL corpus
+    # with no CPUORACLE_MAX_FILES cap (matrix.oracle_cap is empty == all) --
+    # including the full m68000 corpus (127 files / 317.5k cases) per ADR 0006
+    # owner decision #3.  This is the load-bearing m68000 Leg-A probe.  The
+    # gcc/tiny leg runs a documented representative subset (oracle_cap=64) to
+    # avoid replaying the full corpus twice per push; mac/windows likewise cap.
+    - name: Run mametests (oracle + legacy unit tests)
+      env:
+        CPUORACLE_MAX_FILES: ${{ matrix.oracle_cap }}
+      run: ./mametests
     - name: ORM check
       run: python scripts/minimaws/minimaws.py load --executable ./${{ matrix.executable }} --softwarepath hash
     - uses: actions/upload-artifact@main

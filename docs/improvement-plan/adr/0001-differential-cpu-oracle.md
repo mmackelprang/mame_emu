@@ -1,6 +1,6 @@
 # ADR 0001 — Differential CPU execution oracle (+ CI test gating)
 
-> **Status:** In progress (z80 leg landed) · **Phase:** P1 (enabler) · **Owner:** TBD
+> **Status:** Done (z80 + m6502 + m68000 legs landed; `mametests` + `srcclean` wired into CI — boundary D) · **Phase:** P1 (enabler) · **Owner:** TBD
 > **Depends on:** none · **Depended on by:** [0002 (m68000 DRC)](0002-m68000-drcuml-port.md)
 > · **Refined by:** [0006 (m68000 oracle-gate definition)](0006-m68000-oracle-gate-definition.md)
 > (resolves the m68000 leg's authority + cycle-strictness question, OQ #3)
@@ -87,9 +87,27 @@
 >     allowlist (TAS + TRAPV file-level, `addr_error` case-level) is wired + provenance-
 >     cited. **Owner accepted the ~99% probe (ADR 0006 reframed); Leg B (interpreter ≡
 >     DRC) is the load-bearing Phase-2 gate, corpus-immune.**
-> - **Remaining (later PR boundaries):** CI wiring of `mametests` + `srcclean`
->   (boundary D — the last ADR 0001 item), oracle
->   docs (Task 8 — `tests/cpuoracle/README.md` landed with this PR).
+> - **PR boundary D (Tasks 6–7) — landed.** CI wiring of `mametests` + `srcclean`,
+>   the last ADR 0001 item. All three CI legs (`ci-{linux,macos,windows}.yml`) now
+>   build with `TESTS=1`, fetch the pinned corpus
+>   (`fetch_vectors.py --cores z80,m6502,m68000`), and run `./mametests` (the four
+>   legacy Catch2 tests **and** the full oracle). **The Linux clang/mame leg is the
+>   canonical gate and runs the FULL corpus** — including the full m68000 corpus (127
+>   files / 317.5 k cases, no `CPUORACLE_MAX_FILES` cap) per
+>   [ADR 0006](0006-m68000-oracle-gate-definition.md) decision #3. The Linux gcc/tiny
+>   leg, macOS, and the (slower) Windows MSYS2 legs run a documented representative
+>   subset (`CPUORACLE_MAX_FILES=64` per core) as a cross-platform smoke that never
+>   weakens the canonical full-corpus gate (and avoids replaying the full corpus twice
+>   on Linux per push). A fetch failure fails the
+>   leg loudly (the in-harness "skip if fixtures absent" path is for a developer
+>   without the corpus, never CI). The new `srcclean.yml` builds the `srcclean` tool
+>   and runs it over the PR's **changed `src/**` files only** (resolved changed-files
+>   scope), asserting an empty `git diff` (a touched file that is not srcclean-clean
+>   fails the gate). A prerequisite `tests/emu/video/rgbutil.cpp` `-Werror=volatile`
+>   fix (deprecated volatile-qualified compound assignments under C++20/GCC 14.2) was
+>   required for a strict `make TESTS=1` build and landed alongside this wiring.
+>   **With boundary D merged, ADR 0001 is Done and Phase 1 is complete.**
+>   Oracle docs (Task 8 — `tests/cpuoracle/README.md`) landed earlier.
 
 ## Context
 
