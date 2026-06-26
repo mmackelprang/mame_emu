@@ -2248,18 +2248,36 @@ def drc_reg_sets(ii):
             bits |= DRC_REG_DN | DRC_REG_AN
         return bits
 
-    # The source operand is read.
-    rd |= reads_ea(src_ea)
+    # cmp/cmpa/cmpi/cmpm are compare-only: they read both operands and set the
+    # CCR but never write their destination register (no DN/AN write).
+    compare_only = base in ('cmp', 'cmpa', 'cmpi', 'cmpm')
+
+    # The source operand is read.  For Scc the destination byte EA is encoded in
+    # the *source* slot (`scc ds -`), and Scc overwrites it rather than reading
+    # its value, so do not treat the Scc src register as a read.
+    if base in DRC_SCC and src_ea == DRC_EA_DREG:
+        pass
+    else:
+        rd |= reads_ea(src_ea)
     # Auto-inc/dec source updates its An.
     if src_ea in DRC_EA_WRITES_AN:
         rd |= DRC_REG_AN
         wr |= DRC_REG_AN
 
-    # The destination operand is written; computing its address also reads An.
-    if dst_ea == DRC_EA_DREG:
+    # Scc writes a byte to its destination EA, which lives in the source slot.
+    # A Dn destination is a register write; a memory destination only reads the
+    # An used to address it (already captured via reads_ea above).
+    if base in DRC_SCC and src_ea == DRC_EA_DREG:
         wr |= DRC_REG_DN
+
+    # The destination operand is written; computing its address also reads An.
+    # Compare-only ops are excluded from the destination register write.
+    if dst_ea == DRC_EA_DREG:
+        if not compare_only:
+            wr |= DRC_REG_DN
     elif dst_ea == DRC_EA_AREG:
-        wr |= DRC_REG_AN
+        if not compare_only:
+            wr |= DRC_REG_AN
     elif dst_ea in DRC_EA_READS_AN:
         rd |= DRC_REG_AN
         if dst_ea in DRC_EA_WRITES_AN:
@@ -2307,6 +2325,10 @@ def drc_reg_sets(ii):
         sets_ccr = False
     if base in ('addq', 'subq') and dst_ea == DRC_EA_AREG:
         sets_ccr = False
+    # Scc reads the condition codes to form its byte result but does not modify
+    # the CCR.  (The CCR read is added via the conditional-op path below.)
+    if base in DRC_SCC:
+        sets_ccr = False
     # X-using ops read the X flag from CCR as well as writing it.
     if base in ('addx', 'subx', 'abcd', 'sbcd', 'nbcd', 'negx', 'roxl', 'roxr'):
         rd |= DRC_REG_CCR
@@ -2346,7 +2368,8 @@ def drc_flow_flags(ii):
         flags |= DRC_FLOW_BRANCH
     if base in DRC_BCC or base in DRC_DBCC or base in DRC_SCC:
         flags |= DRC_FLOW_CONDITIONAL
-    if base in ('bra', 'jmp', 'rts', 'rte', 'rtr'):
+    # bsr is always-taken like bra (no condition), so it carries UNCONDITION.
+    if base in ('bra', 'bsr', 'jmp', 'rts', 'rte', 'rtr'):
         flags |= DRC_FLOW_UNCONDITION
     if base in ('rts', 'rte', 'rtr'):
         flags |= DRC_FLOW_RETURN
@@ -2363,6 +2386,11 @@ def drc_can_fault(ii):
     base = drc_base_mnemonic(ii[2][0])
     src_ea = drc_ea_mode[ii[2][1]]
     dst_ea = drc_ea_mode[ii[2][2]]
+    # bsr pushes the 32-bit return address onto the stack via SP; a misaligned
+    # SP causes a bus error, so it has a fault surface even though its operand
+    # is a branch displacement rather than a memory EA.
+    if base == 'bsr':
+        return True
     # Hard cfunc categories always fault-capable.
     if base in DRC_HARD_CFUNC:
         # move is only hard when it touches sr/usp; otherwise fall through to
