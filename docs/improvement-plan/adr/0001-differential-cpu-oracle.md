@@ -53,45 +53,42 @@
 >       ops (SHA/SHX/SHY/TAS, `0x93/9B/9C/9E/9F`) all *pass*, so the skip list is
 >       minimal and evidence-based.
 >   - **m68000 leg (Task 5 / [ADR 0006](0006-m68000-oracle-gate-definition.md) Leg A) —
->     landed at ~99.1% state / ~99.4% cycle; strict bar BLOCKED on a corpus-provenance
->     decision.** `[cpu][m68000]` case + `oracle_m68000_device` driving the **new
->     microcode core** (`m68000_device::execute_run()`, not Musashi) + the m68000
->     register map (`d0–d7/a0–a6/usp/ssp/sr/pc`). The fetcher gained an **in-tree
->     decoder** for the corpus's custom binary `.json.bin` container (`manifest.json`
->     marks it `"format": "m68000_bin"`, decoder v2 emits a per-case `addr_error`
->     marker). Three harness-side adapters — **all in the `oracle_m68000_device`
->     subclass reading protected members, ZERO shared-core change** — took the leg from
->     ~30% to ~99%:
->     1. **PC read-back from `m_au`** (ADR 0006 blocker #1): the corpus encodes the
->        final PC from MAME's `m_au` ("next prefetch address" = start + 4), not
->        `STATE_GENPC`'s `m_pc` (= start + 2). Captured at retirement, before the
->        retiring grant advances it. Closed the dominant ~80%-of-cases PC mismatch.
->     2. **`update_user_super()` after applying SR**: the state-interface SR/GENPC
->        imports don't re-sync `m_sp` (active-A7 index) or the program space, so a
->        user-mode push was landing on the supervisor stack. Closed the bulk of the
->        stack-instruction divergence.
->     3. **Deferred-trace snapshot**: 50% of the corpus has `SR.T` set; the corpus
->        snapshots most opcodes BEFORE the trace exception. A pre-grant register/SR
->        snapshot that freezes on the `S_TRACE` dispatch captures the pre-trace state.
->     The DEFAULT gate is a **GREEN report-only run** that WARNs the exact residual
->     (state/cycle divergences per field + per file); `CPUORACLE_M68_STRICT=1` flips on
->     the hard Leg-A `REQUIRE`s and currently FAILS on the residual.
->     **Strict 100%-state is NOT yet reachable — a corpus-provenance blocker, not a
->     harness defect:** the pinned corpus is **internally inconsistent on deferred-trace
->     capture** (pre-trace for ~120 k cases, post-trace — `SR.T` cleared, `SR.S` set,
->     supervisor frame pushed, ~34 extra cycles — for ~38 k). No uniform harness model
->     matches both, and ADR 0006's *"state has no allowlist"* rule does not accommodate
->     a corpus that is itself inconsistent on STATE. The residual is **not cleanly
->     allowlistable** (the "corpus ran the trace" predicate matches ~38 k cases of which
->     only ~1 k actually diverge → a huge convenience-skip ADR 0006 forbids). Separately,
->     **MOVEP.l/w shows a byte-lane RAM divergence (~466 cases)** that is *not*
->     provenance-explained — a candidate real finding, surfaced NOT allowlisted.
->     **Disposition is an owner/Planner call** (amend ADR 0006 for a provenance-cited
->     STATE allowlist / re-pin the corpus / accept the ~99% Leg-A bar). The frozen
->     cycle-divergence allowlist (TAS + TRAPV file-level, `addr_error` case-level) IS
->     wired and provenance-cited. **PR is NOT merged — it awaits this decision.**
-> - **Remaining (later PR boundaries):** m68000 strict-Leg-A disposition (owner), CI
->   wiring of `mametests` + `srcclean` (boundary D — the last ADR 0001 item), oracle
+>     GREEN at ~99.6% state / ~99.3% cycle; Leg A is an owner-ratified high-coverage
+>     PROBE.** `[cpu][m68000]` case + `oracle_m68000_device` driving the **new microcode
+>     core** (`m68000_device::execute_run()`, not Musashi) + the m68000 register map
+>     (`d0–d7/a0–a6/usp/ssp/sr/pc`). The fetcher gained an **in-tree decoder** for the
+>     corpus's custom binary `.json.bin` container (`manifest.json` marks it
+>     `"format": "m68000_bin"`, decoder v2 emits a per-case `addr_error` marker).
+>     **All adapters/fixes are in the `oracle_m68000_device` subclass reading protected
+>     members — ZERO shared-core change** — taking the leg from ~30% to ~99.6%:
+>     1. **PC read-back from `m_au`** (ADR 0006 blocker #1): the corpus encodes PC from
+>        MAME's `m_au` (= start + 4), not `STATE_GENPC`'s `m_pc` (= start + 2). Closed
+>        the dominant ~80%-of-cases PC mismatch.
+>     2. **`update_user_super()` after applying SR**: re-syncs `m_sp` (active-A7 index)
+>        and the program space the state import doesn't, so a user-mode push lands on the
+>        USP, not the supervisor stack.
+>     3. **Deferred-trace snapshot**: a pre-grant register/SR snapshot that freezes on the
+>        `S_TRACE` dispatch captures the pre-trace state the corpus records.
+>     4. **Per-case RAM scrub**: zero each case's initial+final RAM cells before seeding,
+>        so the corpus's zeroed-memory assumption holds (fixed the MOVEP byte-lane case).
+>     5. **Retirement RAM snapshot**: snapshot the watched final-RAM cells at the same
+>        pre-grant retirement point as the registers, so a single-step **over-run** (the
+>        grant that advances `m_ipc` also runs the next instruction's first write) can't
+>        clobber the compared RAM. Fixed the whole `(A7)`/auto-inc-dec/ABCD/ADDX class.
+>     The gate is a **high-coverage probe**: it hard-`REQUIRE`s strict STATE on every case
+>     **outside** a corpus-data-keyed deferred-exception residual (SR.T / TAS/TRAPV /
+>     address-error / branch-self-loop), strict CYCLE on every non-allowlisted such case,
+>     and **asserts out-of-residual divergences `== 0`** — so the residual can't hide a
+>     bug. Inside the residual it reports (stays green). `CPUORACLE_M68_STRICT=1`
+>     hard-`REQUIRE`s the residual too (for a corpus re-pin), failing by design.
+>     **Residual (all reported, `unexplained == 0`):** TRAPV 1250 (upstream-flagged), BSR
+>     11 + Bcc 9 (self-branch), plus the trace/exception classes — all documented
+>     provenance/harness-single-step limitations, **none a core bug**. The frozen cycle
+>     allowlist (TAS + TRAPV file-level, `addr_error` case-level) is wired + provenance-
+>     cited. **Owner accepted the ~99% probe (ADR 0006 reframed); Leg B (interpreter ≡
+>     DRC) is the load-bearing Phase-2 gate, corpus-immune.**
+> - **Remaining (later PR boundaries):** CI wiring of `mametests` + `srcclean`
+>   (boundary D — the last ADR 0001 item), oracle
 >   docs (Task 8 — `tests/cpuoracle/README.md` landed with this PR).
 
 ## Context

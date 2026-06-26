@@ -85,17 +85,33 @@ comparison is exempted.**
 | `TRAPV.json` | file | Upstream STATUS: TRAPV *"appears to trigger incorrectly based on the S bit"* during corpus generation. |
 | address-error cases | case (`addr_error` marker) | Cases whose transaction log carried a read/write address-error cycle (`re`/`we`); AS isn't asserted and results aren't committed upstream, so the corpus cycle count isn't comparable. The fetcher (decoder v2) emits the marker. |
 
-## Status / known blocker (m68000 Leg A)
+## Status (m68000 Leg A — a high-coverage probe)
 
-The harness reaches **~99.1% state / ~99.4% cycle** equality. The DEFAULT
-`[cpu][m68000]` gate is a **GREEN report-only run** that WARNs the exact residual;
-`CPUORACLE_M68_STRICT=1` enables the hard Leg-A `REQUIRE`s (and currently fails on
-the residual). The strict 100%-state bar is **not yet reachable** — a
-corpus-provenance limitation, not a harness defect: the corpus is **internally
-inconsistent on deferred-trace capture** (pre-trace for ~120 k cases, post-trace for
-~38 k), which ADR 0006's *"state has no allowlist"* rule does not accommodate, and
-the residual is not cleanly allowlistable. A separate **MOVEP byte-lane RAM
-divergence** (~466 cases) is a candidate real finding (not allowlisted). The
-disposition is an owner/Planner decision — see the BLOCKER note in `cpuoracle.cpp`
-and ADR 0006. (Phase-2's load-bearing guarantee is **Leg B**, interpreter ≡ DRC,
-which is corpus-drift-immune and unaffected by this.)
+The harness reaches **~99.6% state / ~99.3% cycle** equality, and the
+`[cpu][m68000]` gate is **GREEN**. Per the owner-ratified ADR 0006 reframing, Leg A
+is a **high-coverage conformance PROBE**, not a strict 100%-state gate: it
+hard-`REQUIRE`s strict STATE on every case **outside** a corpus-data-keyed
+deferred-exception residual, strict CYCLE on every non-allowlisted such case, and
+**asserts the count of out-of-residual divergences `== 0`** — so the residual cannot
+hide a regression. Divergences **inside** the residual are reported (the probe stays
+green). `CPUORACLE_M68_STRICT=1` hard-`REQUIRE`s the residual too (for investigating
+a corpus re-pin) and fails on it by design.
+
+**The residual is characterised, owner-accepted, and contains no core bug:**
+
+- **Inconsistent deferred-trace/exception capture** (the dominant class): the
+  MAME-generated corpus snapshots state *before* the trace for most opcodes but
+  *after* it for the exception-taking subset (taken branches; ILLEGAL/TRAP/CHK/RTE/
+  MOVEtoSR; address-error pops). Signature: initial `SR.T` set, OR TAS/TRAPV, OR an
+  address-error case.
+- **Branch-self-loop** (~20 cases): a `BSR -2` / `Bcc -2` branches onto itself, which
+  the harness single-step (retire on `m_ipc` change) re-executes. BSR/Bcc are correct
+  (the corpus runs them once). Signature: BSR/Bcc with `|final.pc − initial.pc| ≤ 4`.
+
+Two earlier suspected limitations were **fixed**, harness-side, zero core change:
+**MOVEP** byte-lane (a cross-case stale-RAM gap → per-case RAM scrub) and the
+**`(A7)`/auto-inc-dec/ABCD/ADDX** class (a single-step **over-run** where the grant
+that advances `m_ipc` ran the next instruction's first write → snapshot the watched
+final-RAM cells at the pre-grant retirement point). See the residual notes in
+`cpuoracle.cpp` and ADR 0006. (Phase-2's load-bearing guarantee is **Leg B**,
+interpreter ≡ DRC, corpus-immune and unaffected by the ~99% Leg-A bar.)
