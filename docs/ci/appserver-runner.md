@@ -77,6 +77,14 @@ fallback. When on appserver the standalone `oracle` job is the correctness gate
 (the `build-linux` matrix is skipped — the single box can't replicate the
 cross-compiler matrix, and it would otherwise run the oracle twice).
 
+**GitHub-hosted-only legs** (`ci-windows`, `ci-macos`, `docs`, `language`,
+`includeguards`, `bgfxshaders`, `hash`) have **no appserver fallback** — they
+can't run on the Linux self-hosted runner. They carry the same `probe-github`
+gate and simply **skip** when GitHub isn't active (forced-appserver or
+quota-out), so they never burn credits while CI is on appserver. They resume
+automatically when the probe succeeds again (GitHub minutes available and
+`CI_FORCE_APPSERVER` unset).
+
 ### Kill-switch / manual override
 Set repo variable **`CI_FORCE_APPSERVER=true`** to skip the probe and force every
 gate onto appserver — the guaranteed escape hatch. Use it when you *know* GH is
