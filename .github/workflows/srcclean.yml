@@ -17,6 +17,8 @@ name: srcclean (changed files)
 
 on:
   push:
+    branches:
+    - main
     paths:
     - '.github/workflows/srcclean.yml'
     - 'src/**'

@@ -2,6 +2,8 @@ name: CI (macOS)
 
 on:
   push:
+    branches:
+    - main
     paths:
     - '.github/workflows/**'
     - '3rdparty/**'
