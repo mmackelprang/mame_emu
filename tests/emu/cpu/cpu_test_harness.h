@@ -101,6 +101,16 @@ public:
 	// snapshots that index; false when the harness should read the live device
 	// instead (the default -- z80/m6502 have no deferred-exception skew).
 	virtual bool oracle_snapshot_reg(int state_index, uint64_t &out) const { (void)state_index; (void)out; return false; }
+
+	// Read a final-RAM cell from the retirement snapshot (m68000: the value the
+	// address held at instruction retirement, before a single-step over-run could
+	// let the next instruction's first write clobber it).  Returns true and sets
+	// `out` when the address is in the watch set; false otherwise (live read).
+	virtual bool oracle_snapshot_ram(uint32_t address, uint8_t &out) const { (void)address; (void)out; return false; }
+
+	// Register the RAM addresses to snapshot at retirement (the case's final-RAM
+	// cells).  No-op for cores that read RAM live.
+	virtual void oracle_set_ram_watch(const std::vector<uint32_t> &) { }
 };
 
 // Describes one CPU core: how to register its driver and how to translate
@@ -177,6 +187,12 @@ public:
 	// true and sets `out` when the core provides a snapshot for that field; false
 	// when the caller should use get_reg() (live device) instead.
 	bool snapshot_reg(const std::string &field, uint64_t &out) const;
+
+	// Register the RAM addresses to snapshot at retirement (the case's final-RAM
+	// cells), and read one back from the retirement snapshot.  snapshot_ram returns
+	// false (read live via read_ram) for cores/addresses without a snapshot.
+	void set_ram_watch(const std::vector<uint32_t> &addrs);
+	bool snapshot_ram(uint32_t address, uint8_t &out) const;
 
 	// Reset the cross-instruction quirk state that a SingleStepTests fixture
 	// does not carry (e.g. the z80 HALT latch and pending NMI), so each case

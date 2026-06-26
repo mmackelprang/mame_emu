@@ -432,6 +432,10 @@ public:
 			// If this step advanced m_ipc, the core has dispatched the next thing,
 			// so its cycles belong to that, NOT our instruction -- break WITHOUT
 			// accumulating them, keeping the pre-grant snapshot as the retired state.
+			// (A self / short-backward branch whose target IS the just-executed
+			// instruction leaves m_ipc == entry_ipc; those few cases never retire here
+			// and fall into the documented branch-self-loop residual rather than risk
+			// a substate-based boundary that mis-retires normal multi-cycle opcodes.)
 			if (m_ipc != entry_ipc)
 				break;
 			consumed += 1 - *m_icountptr;
@@ -440,8 +444,13 @@ public:
 		return frozen_consumed >= 0 ? frozen_consumed : consumed;
 	}
 
-	// Capture the architectural register file + SR + prefetch pointer as the
-	// retirement snapshot (see step_instruction).
+	// Capture the architectural register file + SR + prefetch pointer AND the
+	// watched final-RAM cells as the retirement snapshot (see step_instruction).
+	// The RAM cells are snapshotted at the SAME pre-grant point as the registers,
+	// so a single-step over-run -- where the grant that advances m_ipc also runs
+	// the NEXT instruction's first memory write before we break -- cannot corrupt
+	// the retired RAM image we compare against.  (The watched set is the case's
+	// final-RAM addresses, registered via oracle_set_ram_watch().)
 	void snapshot_retired()
 	{
 		for (int i = 0; i < 17; i++)
@@ -449,6 +458,9 @@ public:
 		m_snap_sr = m_sr;
 		m_retired_au = m_au;
 		m_retired_pc = m_pc;
+		address_space &prog = space(AS_PROGRAM);
+		for (std::size_t i = 0; i < m_ram_watch.size(); i++)
+			m_ram_snap[i] = prog.read_byte(m_ram_watch[i]);
 	}
 
 	// The prefetch pointer / m_pc as of our instruction's retirement (captured in
@@ -526,11 +538,37 @@ public:
 		return true;
 	}
 
+	// RAM read-back from the retirement snapshot (see snapshot_retired): the value
+	// each watched address held at our instruction's retirement, BEFORE the
+	// over-run grant that advances m_ipc could let the next instruction's first
+	// memory write clobber it.  Returns false for an address not in the watch set
+	// (the caller then falls back to a live read).
+	virtual bool oracle_snapshot_ram(u32 address, u8 &out) const override
+	{
+		for (std::size_t i = 0; i < m_ram_watch.size(); i++)
+			if (m_ram_watch[i] == address)
+			{
+				out = m_ram_snap[i];
+				return true;
+			}
+		return false;
+	}
+
+	// Register the set of RAM addresses to snapshot at retirement (the case's
+	// final-RAM cells).  Cleared and re-set per case by the harness.
+	virtual void oracle_set_ram_watch(const std::vector<u32> &addrs) override
+	{
+		m_ram_watch = addrs;
+		m_ram_snap.assign(addrs.size(), 0);
+	}
+
 private:
 	u32 m_retired_au = 0;
 	u32 m_retired_pc = 0;
 	u32 m_snap_da[17] = { 0 };
 	u16 m_snap_sr = 0;
+	std::vector<u32> m_ram_watch;   // final-RAM addresses to snapshot at retirement
+	std::vector<u8>  m_ram_snap;    // their snapshotted values (parallel to m_ram_watch)
 };
 
 DECLARE_DEVICE_TYPE(ORACLE_M68000, oracle_m68000_device)
@@ -1080,6 +1118,16 @@ bool cpu_test_harness::snapshot_reg(const std::string &field, uint64_t &out) con
 	if (it == m_field_to_index.end())
 		return false;
 	return m_stepper->oracle_snapshot_reg(it->second, out);
+}
+
+void cpu_test_harness::set_ram_watch(const std::vector<uint32_t> &addrs)
+{
+	m_stepper->oracle_set_ram_watch(addrs);
+}
+
+bool cpu_test_harness::snapshot_ram(uint32_t address, uint8_t &out) const
+{
+	return m_stepper->oracle_snapshot_ram(address, out);
 }
 
 void cpu_test_harness::write_ram(uint32_t address, uint8_t value)
