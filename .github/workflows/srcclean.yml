@@ -30,7 +30,9 @@ permissions:
 
 jobs:
   srcclean:
-    runs-on: ubuntu-latest
+    # appserver self-hosted runner (GH-hosted Actions minutes exhausted);
+    # see docs/ci/appserver-runner.md.
+    runs-on: [self-hosted, linux, x64, appserver]
     steps:
     - uses: actions/checkout@main
       with:
