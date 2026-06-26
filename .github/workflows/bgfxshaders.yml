@@ -2,6 +2,8 @@ name: Rebuild BGFX shaders
 
 on:
   push:
+    branches:
+    - main
     paths:
     - '.github/workflows/**'
     - 'src/osd/modules/render/bgfx/shaders/**'
