@@ -3,7 +3,7 @@
 > **Status:** In progress — **PR boundaries K + L + M shipped** (Tasks 1–5) · **Consumes:** ADR [0002](../adr/0002-m68000-drcuml-port.md)
 > **Hard gate:** ADR [0001](../adr/0001-differential-cpu-oracle.md) — the m68000 oracle
 > **Spec:** [`../specs/2026-06-24-mame-improvements-design.md`](../specs/2026-06-24-mame-improvements-design.md)
-> **Date:** 2026-06-24 · **Last updated:** 2026-06-26 (boundary M shipped — real per-PC native DISPATCH + the first native opcode (moveq); dual-leg cycle-exact on x64 + C backends)
+> **Date:** 2026-06-24 · **Last updated:** 2026-06-27 (boundary M shipped — single resident-block DISPATCH + the first native opcode (moveq) via hybrid handoff; dual-leg cycle-exact on x64 + C backends. **The memory-EA half — the hot path — is now designed in [ADR 0007](../adr/0007-m68000-native-memory-ea-suspend-mechanism.md), which boundary O / Task 10 depends on.**)
 
 ## Goal
 
@@ -29,6 +29,9 @@ not infra-only:
 
 [0002](../adr/0002-m68000-drcuml-port.md) — the entire phase. Targets the **new microcode
 core** (`src/devices/cpu/m68000/m68000.cpp`), not the legacy Musashi core.
+[0007](../adr/0007-m68000-native-memory-ea-suspend-mechanism.md) — an **addendum to 0002**
+that designs the native memory-EA + suspend/cycle/address-error mechanism (0002 §3 deferred all
+memory-touching opcodes to `cfunc_`); **boundary O / Task 10 consumes it**.
 
 ## Prerequisites
 
@@ -300,19 +303,47 @@ PR, but `./mame -validate` and the interpreter leg must remain green.)
 
 ### Task 10 — Widen native coverage (follow-up increments, oracle-gated each step)
 
+> **DEPENDS ON [ADR 0007](../adr/0007-m68000-native-memory-ea-suspend-mechanism.md).** The
+> register-only opcodes (boundary M's hybrid-handoff family) cover < 44% of dynamic cycles and
+> **cannot** reach the throughput bar; the real hot path is memory-addressing (aurail's
+> `btst #n,(xxx).W` = 43% of cycles). ADR 0007 designs the load-bearing mechanism that boundary O
+> needs: a native bus-access primitive (`generate_bus_step()`) that issues `UML_READ`/`UML_WRITE`
+> against `SPACE_PROGRAM` and reproduces the interpreter's **per-bus-cycle** cycle charge, two-way
+> suspend checkpoint (`m_icount<=0 && access_to_be_redone()` → refund-and-replay vs.
+> keep-and-advance, setting `m_inst_substate`), and `m_aob&1 → S_ADDRESS_ERROR` fault branch — with
+> cycle constants and substate numbers **single-sourced from the generator**, never re-estimated.
+> The boundary-M hybrid handoff does **not** generalize to memory-EA opcodes (their hot work *is* the
+> bus read, which the handoff would hand back to the interpreter — leaving it `cfunc_`).
+
 - **Files (edit):** `m68000drc.cpp`, `m68000fe.cpp` (incrementally move opcodes from
-  `cfunc_` to native emission).
+  `cfunc_` to native emission, reusing `generate_bus_step()` from ADR 0007); `m68000gen.py` +
+  `m68000-drcdesc.ipp` (extend the descriptor table with the per-opcode bus-step list — access
+  kind/size/byte-lane, `−N` charge, redo/completed substate pair — additive-only, empty diff on the
+  existing generated files per Task 2 / R3).
 - **Change:** Each follow-up shrinks the `cfunc_` fallback set by emitting native UML for
-  more opcodes, **re-validated by the oracle every step**. Out of scope for increment 1:
-  m68010 (minor delta — resolved: base 68000 only for P2), m68020/030/040 + FPU + MMU
-  (separate, much larger ADR addenda), ColdFire / scc68070 / fscpu32 / MCU variants.
-- **Test/Validation:** Per step, the dual-leg oracle (`./mametests "[m68000]"`,
-  register/flag/memory/cycle) stays green; the Task 6 coverage assertion is updated to the
-  new native set; the Task 7 benchmark is re-run (perf reported). **Green:** monotonic
+  more opcodes, **re-validated by the oracle every step**. **ADR 0007's ordered batch plan:**
+  - **O-mem-1** (the mechanism PR — lands first and alone): `generate_bus_step()` infra +
+    **`btst #n,(xxx).W/.L`** (the profiled hot opcode). Reviewed in isolation against Leg B on the
+    full backend matrix before any reuse.
+  - **O-mem-2:** `btst`/`bchg`/`bclr`/`bset` with `(An)`/`(An)+`/`-(An)` (adds the write checkpoint /
+    RMW path).
+  - **O-mem-3:** memory-EA `MOVE`/`MOVEA` (`.b`/`.w`/`.l`) — the broadest coverage jump.
+  - **O-mem-4:** memory-EA `ALU` (`add`/`sub`/`and`/`or`/`eor`/`cmp` + immediate forms).
+  - **O-mem-5+:** `(d16,PC)` source, `addq`/`subq`/`Scc`/`clr`/`tst`/`neg`/`not` memory-EA forms.
+
+  O-mem-2…5 are independent given O-mem-1 and ordered by profiled cycle weight. Still out of scope:
+  m68010 (minor delta — base 68000 only for P2), m68020/030/040 + FPU + MMU (separate, much larger
+  ADR addenda), ColdFire / scc68070 / fscpu32 / MCU variants, indexed `(d8,An,Xn)` / `movem` /
+  `movep` / `tas` RMW (timing-subtle; later or permanent `cfunc_`).
+- **Test/Validation:** Per step, the dual-leg oracle (`./mametests "[m68000]"` +
+  `"[m68000][drc]"`, register/flag/memory/cycle) stays green; the Task 6 coverage assertion is
+  updated to the new native set; the Task 7 benchmark is re-run (perf reported — expect the first
+  real speedup at O-mem-1, since `btst`-absolute is now native). **Green:** monotonic
   native-coverage growth with the oracle green at every step.
 
 > **PR boundary O** (Task 10, repeated): one PR per coverage-widening batch, each gated by
-> the oracle. These are post-increment-1 and may continue indefinitely.
+> the oracle and built on the ADR-0007 mechanism. These are post-increment-1 and may continue
+> indefinitely.
 
 ---
 
@@ -326,10 +357,10 @@ PR, but `./mame -validate` and the interpreter leg must remain green.)
 | N | 6–7 | Native-coverage assertion + throughput bar | coverage + speedup ≥ bar |
 | (matrix) | 8 | x64 / C / arm64 backends | dual-leg oracle per backend |
 | (smoke) | 9 | Game-boot belt-and-suspenders | identical under `-drc 0/1` |
-| O… | 10 | Coverage-widening follow-ups | dual-leg oracle per batch |
+| O… | 10 | Coverage-widening follow-ups (memory-EA — [ADR 0007](../adr/0007-m68000-native-memory-ea-suspend-mechanism.md) mechanism; `btst`-absolute first, then memory-EA MOVE/ALU) | dual-leg oracle per batch |
 
 Strictly sequential through M (each depends on the prior plumbing). N/8/9 gate the
-increment-1 "done." O repeats post-increment-1.
+increment-1 "done." **O depends on [ADR 0007](../adr/0007-m68000-native-memory-ea-suspend-mechanism.md)** (the native bus-access + suspend/cycle/address-error mechanism); O-mem-1 (the mechanism + `btst`-absolute) lands first and alone, then O-mem-2…5 widen. O repeats post-increment-1.
 
 ## Test deliverables (Phase 2)
 
@@ -370,7 +401,13 @@ increment-1 "done." O repeats post-increment-1.
   **stops** if red; but the prior "unreachable cycle equality" failure mode is removed.
 - **R2 — 68k prefetch/bus-timing edge cases.** Genuinely hard; expect a long `cfunc_` tail
   that shrinks slowly (ADR 0002). Mitigation: increment 1 deliberately limits native scope
-  to the non-faulting user-mode common path; everything timing-subtle stays `cfunc_`.
+  to the non-faulting user-mode common path; everything timing-subtle stays `cfunc_`. The
+  *memory-EA* bus timing (the dominant remaining cycle share) is addressed by
+  [ADR 0007](../adr/0007-m68000-native-memory-ea-suspend-mechanism.md), which charges cycles
+  **per bus step from the same generated microcode truth** the interpreter uses (never
+  re-estimated) and reproduces the interpreter's exact suspend/fault checkpoints in UML —
+  cycle-exactness enforced by construction-plus-Leg-B. The genuinely subtle remainder (indexed EA,
+  `movem`/`movep`/`tas` RMW) stays `cfunc_`.
 - **R3 — generator extension churns committed files.** A mis-scoped generator change could
   rewrite the existing generated decode files. Mitigation: Task 2 asserts an **empty diff**
   on existing generated outputs (additive-only), gated by the oracle.

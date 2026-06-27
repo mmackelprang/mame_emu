@@ -20,6 +20,7 @@ plans, and then a later implementation program.
 | [0004](adr/0004-web-control-surface.md) | Web control surface (REST + SPA over the HTTP server) | **P3** | — |
 | [0005](adr/0005-build-and-driverlist-friction.md) | Build & driver-list friction reduction | **P1** | — |
 | [0006](adr/0006-m68000-oracle-gate-definition.md) | m68000 differential-oracle gate definition (authority / pinning / acceptance) | **P1** | **0001** (refines); consumed by **0002** |
+| [0007](adr/0007-m68000-native-memory-ea-suspend-mechanism.md) | m68000 DRC native memory-EA + suspend / cycle / address-error mechanism | **P2** | **0002** (addendum), **0006** (Leg B = gate); consumed by **boundary O** |
 
 ## Phase map (dependency-ordered)
 
@@ -31,7 +32,10 @@ P1 — Enablers + quick wins (mutually independent)
                                           ▼
 P2 — m68000 DRC
      └── 0002  m68000 → DRCUML  ── gated on 0001's oracle, gate DEFINED by 0006
-                                    (Leg B: interpreter ≡ DRC, cycle-exact, corpus-drift-immune)
+          │                         (Leg B: interpreter ≡ DRC, cycle-exact, corpus-drift-immune)
+          └── 0007  native memory-EA + suspend/cycle/address-error mechanism
+                    (addendum to 0002; unlocks the memory-addressing half — the hot path;
+                     consumed by boundary O; gated by 0006 Leg B)
 
 P3 — Web control surface
      └── 0004  REST + SPA  ── independent of 0002; sequenced last (largest new surface)
@@ -73,7 +77,12 @@ the per-phase task plans (`plan/phase-{1,2,3}-*.md`) from these ADRs.
   shipped — boundary L **lights up oracle Leg B** (interpreter ≡ DRC, register/flag/RAM/
   **cycle** exact on the x64 + C UML backends), the cycle-exact gate the remaining DRC
   boundaries regress against. Native UML emission (boundary M) is next; it was unblocked by
-  Phase 1's m68000 oracle (Leg B) being green.
+  Phase 1's m68000 oracle (Leg B) being green. **Boundary M has now shipped** (single
+  resident-block dispatch + the first native opcode, `moveq`, via a hybrid handoff). The
+  **memory-addressing half** of the ISA — the actual hot path (aurail's `btst #n,(xxx).W` is
+  43% of cycles) — is unlocked by **[ADR 0007](adr/0007-m68000-native-memory-ea-suspend-mechanism.md)**,
+  which designs the native bus-access + per-bus-cycle suspend / cycle / address-error mechanism
+  that every memory-EA boundary-O batch shares.
 - **Phase 3** is **read-write v1**: the `http.cpp:185` body-read fix, a token auth model,
   static-handler traversal hardening, and localhost-default bind are all first-class v1
   tasks. Independent of Phase 2.
@@ -88,6 +97,7 @@ the per-phase task plans (`plan/phase-{1,2,3}-*.md`) from these ADRs.
 | 0004 | Proposed | 5 | HTTP server is **already frontend-owned** (`machine_manager`) and created before any machine — launcher endpoints just need frontend-scoped registration. Read-only first; localhost-default + traversal hardening required. |
 | 0005 | **Done** | 5 | Tooling-only — **all three boundaries shipped.** H: source-staleness detector + `make check-sources` (PR #2). I: `reconcilelist --fix` autofix + byte-exact golden tests; CI runs check mode only (PR #6). J: fast `preflight` CI job (tiny build + `-validate` + reconcile check, gating the multi-hour legs) + tooling docs (`scripts/build/README-friction.md`). Additive/upstream-friendly; CI never runs `--fix`. Unit-tested. |
 | 0006 | **Accepted** | 3 | Resolves the m68000 oracle-gate question. **Corpus is MAME-derived** (upstream: *"Generated using the microcoded core in MAME"*, 2024-08-01 snapshot) → **not** an independent oracle. Authority = the in-tree interpreter; corpus = a probe. Gate = **Leg A** (interpreter vs corpus: 100% state + cycle-except-allowlist {TAS, TRAPV, address-error}) + **Leg B** (interpreter ≡ DRC: full cycle equality, drift-immune — what P2 needs). Keeps the pin; adds a provenance-cited frozen allowlist. Blocker #1 (PC offset) = harness adapter (read PC from `m_au`). |
+| 0007 | Proposed | 5 | **Addendum to 0002** — the native memory-EA + suspend/cycle/address-error mechanism (0002 §3 deferred all of this to `cfunc_`). Unlocks the memory-addressing half of the ISA (aurail's `btst #n,(xxx).W` = 43% of cycles). Key fact: the 68000 interruptible read is a **flag** (`m_access_to_be_redone`), not a longjmp — so the DRC can issue `UML_READ` natively + emit the interpreter's own post-read checkpoint (charge / two-way suspend / `m_aob&1→S_ADDRESS_ERROR`) in UML, cycle constants + substates single-sourced from the generator. Mechanism = `generate_bus_step()`; **not** the mips3 batched `MAPVAR_CYCLES` idiom (68000 suspends *between* charges). Increment: `btst`-absolute first (O-mem-1), then memory-EA MOVE/ALU. Gated by **0006 Leg B**. |
 
 **Cross-cutting test mandate (all phases):** every ADR carries an explicit Testing &
 validation section. P1 first wires `make TESTS=1 && ./mametests` and `srcclean` into
