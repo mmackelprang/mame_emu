@@ -176,7 +176,14 @@ additive) and must be fixed before commit.
 |---|---|---|
 | **K** | 1–2 | Cut-line doc + generated DRC descriptor table. **No behavior change.** ✅ shipped. |
 | **L (lit Leg B)** | 3–4 | DRC frontend skeleton (`m68000fe.{cpp,h}`, consumes the K table, no UML emit) + dual-path `execute_run()` with a **100% `cfunc_`** dispatcher (entry block = `UML_CALLC` interpreter-quantum → `UML_EXIT`; no native emission). Lights up oracle **Leg B** (interpreter ≡ DRC, register/flag/RAM/**cycle** exact) on the x64 (`drcbex64`) + C (`drcbec`) backends. Interpreter arm byte-unchanged; `m_isdrc` scoped to plain M68000. ✅ shipped. |
-| M | 5 | First native UML emission for the opcode set above. |
+| M | 5 | Real per-PC native **dispatch** (`m68000drc.cpp`: entry HASHJMPs on `m_ipc` → per-PC block; `nocode`/`out_of_cycles` handlers; on-demand `code_compile_block`) **+ the first native opcode, `moveq`**, via a hybrid handoff (native CASE 0 = the `Dn`/CCR write + prefetch-pipe advance; the interpreter `cfunc_`s CASE 1+2 = the interruptible prefetch, the `m_icount-=4` cycle charge, and the dispatch — so the cycle cost comes from the interpreter, never re-estimated, and it is cycle-exact by construction). Everything except `moveq` still `cfunc_`s. Leg B 15.7M assertions cycle-exact on `drcbex64` + `drcbec`. ✅ shipped. |
+| O… | 10 | The **rest of the increment-1 native set** above (ALU/MOVE/branch/Bcc/Scc/addq/subq) widens opcode-by-opcode on top of the boundary-M dispatch, each step gated by Leg B. |
 
 This document is updated when the native set changes (each coverage-widening increment, ADR
 0002 §4 / Phase-2 Task 10).
+
+### Native opcodes shipped (current)
+
+| Opcode | Boundary | Native emission |
+|---|---|---|
+| `moveq #imm,Dn` | M | CASE 0 native (register/flag write + prefetch-pipe advance); timing tail `cfunc_`'d to the interpreter via the hybrid handoff. |

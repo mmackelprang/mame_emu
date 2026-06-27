@@ -1,9 +1,9 @@
 # Phase 2 — m68000 → DRCUML port (Pick 2)
 
-> **Status:** In progress — **PR boundaries K + L shipped** (Tasks 1–4) · **Consumes:** ADR [0002](../adr/0002-m68000-drcuml-port.md)
+> **Status:** In progress — **PR boundaries K + L + M shipped** (Tasks 1–5) · **Consumes:** ADR [0002](../adr/0002-m68000-drcuml-port.md)
 > **Hard gate:** ADR [0001](../adr/0001-differential-cpu-oracle.md) — the m68000 oracle
 > **Spec:** [`../specs/2026-06-24-mame-improvements-design.md`](../specs/2026-06-24-mame-improvements-design.md)
-> **Date:** 2026-06-24 · **Last updated:** 2026-06-26 (boundary L shipped — Leg B lit up, dual-leg cycle-exact on x64 + C backends)
+> **Date:** 2026-06-24 · **Last updated:** 2026-06-26 (boundary M shipped — real per-PC native DISPATCH + the first native opcode (moveq); dual-leg cycle-exact on x64 + C backends)
 
 ## Goal
 
@@ -173,7 +173,7 @@ PR, but `./mame -validate` and the interpreter leg must remain green.)
 > Invocation: `./mametests "[m68000]"` (Leg A) · `./mametests "[m68000][drc]"` (Leg B x64) ·
 > `CPUORACLE_M68_DRC_C=1 ./mametests "[m68000][drc]"` (Leg B C backend). **Boundary M is next.**
 
-### Task 5 — `m68000drc.cpp`: emit native UML for the common-path opcode set 🚀 IN-FLIGHT (PR boundary M)
+### Task 5 — `m68000drc.cpp`: emit native UML for the common-path opcode set ✅ DONE — first native opcode (PR boundary M)
 
 - **Files (new):** `src/devices/cpu/m68000/m68000drc.cpp`.
 - **Files (edit):** `scripts/src/cpu.lua` (register the new file); `m68000.cpp` /
@@ -197,6 +197,36 @@ PR, but `./mame -validate` and the interpreter leg must remain green.)
 > **PR boundary M** (Task 5): first native UML emission for the common-path set. **The
 > headline increment.** Merge only on a green dual-leg oracle across the backend matrix
 > (Task 8).
+> **✅ Shipped.** Boundary M lands two things: (1) the **real per-PC native DISPATCH** —
+> `m68000drc.cpp`'s entry block HASHJMPs on the live instruction address (`m_ipc`) to a
+> per-PC compiled block, with `nocode` / `out_of_cycles` static handlers and an on-demand
+> `code_compile_block`, replacing boundary L's single 100%-`cfunc_` block (mips3/ppc
+> pattern); and (2) the **first native opcode — `moveq`** — emitted as native UML.
+> `moveq`'s native path uses a **hybrid handoff**: it emits the interpreter microcode's
+> CASE 0 natively (the architectural artifact — the `Dn` write, the CCR `N/Z` with `V=C=0`
+> and `X/I/S/T` preserved, and the prefetch-pipe pointer advance — all compile-time
+> constants of the opcode word), then sets `m_inst_substate=1` and hands the timing tail
+> (CASE 1+2: the interruptible prefetch, the `m_icount-=4` **cycle charge taken from the
+> interpreter, never re-estimated**, the suspend/payback bookkeeping, and the decode-table
+> dispatch) to the **unchanged interpreter** via the quantum `cfunc_`. This keeps the
+> 68000's prefetch/bus-timing model in the one place that owns it while making `moveq`'s
+> architectural effect native, and is **cycle-exact by construction** (the interpreter
+> resumes at substate 1 without re-running CASE 0). Everything except `moveq` still
+> `cfunc_`s, so it stays exact by construction. **Two dispatch bugs** the boundary-L
+> dormant path never exercised were found and fixed under the full corpus: the per-PC hash
+> must be registered at *exactly* the requested PC (the 68000 prefetch PC adapter means the
+> frontend's sequence-head PC differs — a wrong hash spun MISSING_CODE forever), and the
+> static handlers must be **transient** (`begin_block`), not invariant — regenerating
+> invariant blocks per flush leaked the cache's small permanent area until `reset()` threw
+> "Out of cache space" the first time the 8 MiB cache filled (~52 k cases in). **Gate (all
+> green):** Leg A unchanged (317,885 assertions, interpreter byte-for-byte unchanged); Leg B
+> (interpreter ≡ DRC, register/flag/RAM/**cycle** exact) **15,722,462 assertions** across the
+> full 128-fixture corpus on **drcbex64 (x64)** *and* **drcbec (C backend)**; `mametiny
+> -validate` clean (m68000drc links in the tiny build); z80/m6502 oracles green. **arm64
+> deferred to the appserver/CI matrix.** The **rest of the increment-1 in-set**
+> (ALU/MOVE/branch/Bcc/Scc/addq/subq) widens opcode-by-opcode in **boundary O** (Task 10),
+> each step gated by Leg B, on top of this dispatch. **Boundary N (Tasks 6–7) is next** —
+> the native-coverage assertion + the throughput bar.
 
 ### Task 6 — Native-coverage acceptance: measure & assert the fallback ratio
 
@@ -282,7 +312,7 @@ PR, but `./mame -validate` and the interpreter leg must remain green.)
 |---|---|---|---|
 | K ✅ | 1–2 | Gate check + generator descriptor extension | oracle green (decode unchanged) — **shipped (PR #22, boundary K)** |
 | L ✅ | 3–4 | Frontend skeleton + dual-path plumbing (100% `cfunc_`) | dual-leg oracle (full fallback) — **shipped (boundary L): Leg B lit up, interpreter ≡ DRC cycle-exact on x64 (drcbex64) + C (drcbec); arm64 deferred to CI** |
-| M | 5 | Native UML for the common-path opcode set | dual-leg oracle, cycle-exact |
+| M ✅ | 5 | Native UML for the common-path opcode set | dual-leg oracle, cycle-exact — **shipped (boundary M): real per-PC native DISPATCH + first native opcode (moveq, hybrid handoff); Leg B 15.7M assertions cycle-exact on x64 (drcbex64) + C (drcbec); rest of the in-set widens in boundary O** |
 | N | 6–7 | Native-coverage assertion + throughput bar | coverage + speedup ≥ bar |
 | (matrix) | 8 | x64 / C / arm64 backends | dual-leg oracle per backend |
 | (smoke) | 9 | Game-boot belt-and-suspenders | identical under `-drc 0/1` |
