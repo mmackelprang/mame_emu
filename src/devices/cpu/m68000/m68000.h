@@ -231,6 +231,7 @@ protected:
 	u32                        m_drcoptions;    // configurable DRC options
 	bool                       m_cache_dirty;   // true if we need to flush the cache
 	bool                       m_isdrc;         // true if we're in DRC mode (latched from allow_drc())
+	int                        m_drc_labelnum;  // monotonic UML label counter for per-block code labels
 
 	// Typed constructor
 	m68000_device(const machine_config &mconfig, device_type type, const char *tag, device_t *owner, u32 clock);
@@ -244,8 +245,9 @@ protected:
 	void static_generate_entry_point(drcuml_block &block);         // entry: HASHJMP on m_ipc to the per-PC block
 	void static_generate_nocode_handler(drcuml_block &block);      // HASHJMP miss: record PC, exit MISSING_CODE
 	void static_generate_out_of_cycles(drcuml_block &block);       // suspend: record PC, exit OUT_OF_CYCLES
-	void generate_opcode(drcuml_block &block, const opcode_desc *desc);             // emit UML for one instruction (native or cfunc)
-	void generate_interpreter_fallback(drcuml_block &block, const opcode_desc *desc); // run the interpreter for this one instruction
+	void generate_opcode(drcuml_block &block, u16 opword);          // emit UML for one instruction (native or cfunc)
+	void generate_interpreter_fallback(drcuml_block &block);       // run the interpreter for the granted quantum
+	void generate_moveq(drcuml_block &block, u16 opword);          // native UML for moveq #imm,Dn (boundary M's first native opcode)
 	void func_interpret_quantum();              // run the interpreter for the granted quantum (the cfunc body)
 	static void cfunc_interpret_quantum(void *param);
 

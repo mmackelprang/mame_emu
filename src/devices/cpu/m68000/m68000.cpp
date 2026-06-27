@@ -62,7 +62,8 @@ m68000_device::m68000_device(const machine_config &mconfig, device_type type, co
 	  m_out_of_cycles(nullptr),
 	  m_drcoptions(0),
 	  m_cache_dirty(true),
-	  m_isdrc(false)
+	  m_isdrc(false),
+	  m_drc_labelnum(1)
 {
 }
 

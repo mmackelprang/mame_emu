@@ -197,19 +197,33 @@ void m68000_device::static_generate_out_of_cycles(drcuml_block &block)
 
 void m68000_device::code_compile_block(offs_t pc)
 {
+	// Fetch the opcode word at this instruction address (side-effect free, as the
+	// interpreter's state_import does) so generate_opcode can dispatch the native
+	// fast-path by opcode.  This mirrors the interpreter's m_ird at the start of
+	// the instruction.
+	u16 opword;
+	{
+		auto dis = machine().disable_side_effects();
+		opword = m_s_opcodes->read_word(pc);
+	}
+
 	bool succeeded = false;
 	while(!succeeded) {
 		try {
-			drcuml_block &block(m_drcuml->begin_block(64));
+			drcuml_block &block(m_drcuml->begin_block(128));
+
+			// labels are scoped per block; restart the counter so values stay
+			// small and unique within this block
+			m_drc_labelnum = 1;
 
 			// register the hash at EXACTLY the requested pc, so the entry block's
 			// HASHJMP(m_ipc) resolves here after this compile
 			if(!m_drcuml->hash_exists(M68K_DRC_MODE, pc))
 				UML_HASH(block, M68K_DRC_MODE, pc);                    // hash mode,pc
 
-			// emit the per-PC body (interpreter fallback for the whole in/out-set
-			// at boundary M; native emitters replace it opcode-by-opcode later)
-			generate_opcode(block, nullptr);
+			// emit the per-PC body: native for the in-set opcodes, interpreter
+			// cfunc for the rest
+			generate_opcode(block, opword);
 
 			block.end();
 			succeeded = true;
@@ -227,34 +241,36 @@ void m68000_device::code_compile_block(offs_t pc)
 
 //-------------------------------------------------
 //  generate_opcode - emit UML for one instruction:
-//  native for the in-set opcodes, cfunc otherwise
+//  native for the in-set opcodes, interpreter
+//  cfunc for everything else
 //-------------------------------------------------
 
-void m68000_device::generate_opcode(drcuml_block &block, const opcode_desc *desc)
+void m68000_device::generate_opcode(drcuml_block &block, u16 opword)
 {
-	// The per-PC block body.  Boundary M establishes the real per-PC native
-	// DISPATCH (HASHJMP-to-block) with an interpreter body; native per-opcode
-	// emitters land on top of this provably-correct base in follow-up
-	// increments, each gated by the Leg-B oracle, so coverage can only grow with
-	// the gate green.  `desc` is null on the fallback path (the body is
-	// PC-agnostic -- it runs the interpreter for the granted quantum); when a
-	// native emitter is added it will switch on the descriptor row here.
-	generate_interpreter_fallback(block, desc);
+	// Native dispatch by opcode pattern.  Boundary M emits its first NATIVE UML
+	// for moveq -- the cleanest in-set opcode (single microcode state, no memory
+	// operand, no An destination; its result and CCR are compile-time constants
+	// of the opcode word).  Every other opcode -- the rest of the in-set and all
+	// out-of-set / faulting / timing-subtle cases -- routes to the interpreter
+	// cfunc, so it stays register/flag/RAM/CYCLE exact by construction.  Coverage
+	// widens opcode-by-opcode in the follow-up increments (Task 10 / boundary O),
+	// each gated by the Leg-B oracle.
+	if((opword & 0xf100) == 0x7000)            // moveq #imm,Dn  (0111 rrr0 dddddddd)
+		generate_moveq(block, opword);
+	else
+		generate_interpreter_fallback(block);
 }
 
 
 //-------------------------------------------------
 //  generate_interpreter_fallback - emit a UML
-//  sequence that runs the interpreter for exactly
-//  this one instruction (the cfunc tail).  This is
-//  the provably-correct base every native emitter
-//  replaces opcode-by-opcode.
+//  sequence that runs the interpreter for the
+//  granted quantum (the provably-correct base for
+//  every opcode not yet emitted natively)
 //-------------------------------------------------
 
-void m68000_device::generate_interpreter_fallback(drcuml_block &block, const opcode_desc *desc)
+void m68000_device::generate_interpreter_fallback(drcuml_block &block)
 {
-	(void)desc;
-
 	// Run the interpreter microcode loop for whatever icount budget the
 	// scheduler/harness granted.  Because the harness grants one bus cycle at
 	// a time and detects retirement via m_ipc, this advances the core by one
@@ -265,5 +281,94 @@ void m68000_device::generate_interpreter_fallback(drcuml_block &block, const opc
 
 	// After the granted quantum the scheduler has no more cycles to give for
 	// this timeslice; hand control back so it can re-grant (or retire).
+	UML_EXIT(block, EXECUTE_OUT_OF_CYCLES);                           // exit   EXECUTE_OUT_OF_CYCLES
+}
+
+
+//-------------------------------------------------
+//  generate_moveq - native UML for moveq #imm,Dn
+//
+//  moveq encoding: 0111 rrr0 dddddddd (0x7000, mask 0xf100); rx=(op>>9)&7,
+//  imm=s8(op).  The interpreter handler (moveq_imm8o_dd_d{f,p}) is a SINGLE
+//  microcode state with a 3-substate suspend machine:
+//    case 0: m_aob=m_au; m_ir=m_irc; m_pc=m_au; m_da[rx]=ext32(m_ftu);
+//            m_au+=2; alu_and(m_ftu,0xffff); sr_nzvc(); m_ird=m_ir;
+//            if(m_next_state!=S_TRACE) m_next_state=m_int_next_state;
+//            m_base_ssw=SSW_PROGRAM|SSW_R;
+//    case 1: m_edb=read_interruptible(m_aob&~1); m_icount-=4; <suspend if <=0>
+//    case 2: <addr-error if aob&1>; m_irc=m_dbin=m_edb; set_ftu_const();
+//            m_inst_state=...; <trace>
+//
+//  m_ftu at moveq entry == s8(opword) (set by the prior set_ftu_const for the
+//  0x7 group), so the RESULT and the NZVC flags are COMPILE-TIME CONSTANTS:
+//    result = ext32(s8(op)) = s32(s16(s8(op)))         (sign-extend imm8 -> 32)
+//    sr_nzvc after alu_and(m_ftu,0xffff): N=bit15(m_ftu), Z=(m_ftu==0), V=C=0;
+//    X/I/S/T preserved.
+//
+//  HYBRID HANDOFF (cycle-exact by construction): the native block emits CASE 0
+//  natively (the genuine native artifact -- the architectural register/flag
+//  write + the prefetch-pipe pointer advance), then sets m_inst_substate=1 and
+//  hands CASE 1+2 (the interruptible prefetch, the m_icount-=4 cycle charge, the
+//  suspend/payback bookkeeping and the decode-table dispatch -- all
+//  timing-subtle, and read_interruptible has no UML opcode) to the UNCHANGED
+//  interpreter via the quantum cfunc.  The interpreter resumes at substate 1
+//  WITHOUT re-running case 0, so the work is done once, and the cycle charge is
+//  exactly the interpreter's own -4.  On a resume grant (substate!=0) the block
+//  delegates the whole quantum to the interpreter.  This makes moveq's
+//  architectural effect native while keeping the 68000's prefetch timing model
+//  in the one place that owns it -- the interpreter.
+//-------------------------------------------------
+
+void m68000_device::generate_moveq(drcuml_block &block, u16 opword)
+{
+	const int rx = (opword >> 9) & 7;
+	const u16 ftu = u16(s16(s8(opword & 0xff)));            // m_ftu at entry = s8(opword) in 16 bits
+	const u32 result = u32(s32(s16(ftu)));                  // ext32(m_ftu) -> sign-extended imm8 in 32 bits
+	// sr_nzvc(): only N,Z can be set (V=C=0); X,I,S,T preserved.
+	const u32 set_nz = (ftu == 0 ? u32(SR_Z) : 0u) | ((ftu & 0x8000) ? u32(SR_N) : 0u);
+
+	const int lbl_delegate = m_drc_labelnum++;
+
+	// --- resume / mid-suspend guard ---
+	// If m_inst_substate != 0 this is a payback / dispatch re-entry of an
+	// in-flight moveq: the native case-0 already ran on the fresh grant, so just
+	// hand the quantum to the interpreter (which owns substate 1/2).
+	UML_LOAD(block, I0, &m_inst_substate, 0, SIZE_WORD, SCALE_x1);     // i0 = m_inst_substate
+	UML_CMP(block, I0, 0);
+	UML_JMPc(block, COND_NE, lbl_delegate);
+
+	// --- CASE 0 (native): architectural write + prefetch-pipe advance ---
+	UML_MOV(block, mem(&m_aob), mem(&m_au));                           // m_aob = m_au
+	UML_LOAD(block, I0, &m_irc, 0, SIZE_WORD, SCALE_x1);               // i0 = m_irc
+	UML_STORE(block, &m_ir, 0, I0, SIZE_WORD, SCALE_x1);              // m_ir = m_irc
+	UML_MOV(block, mem(&m_pc), mem(&m_au));                            // m_pc = m_au
+	UML_MOV(block, mem(&m_da[rx]), result);                            // m_da[rx] = ext32(m_ftu)
+	UML_ADD(block, mem(&m_au), mem(&m_au), 2);                         // m_au += 2
+	// m_sr = (m_sr & ~NZVC) | set_nz
+	UML_LOAD(block, I0, &m_sr, 0, SIZE_WORD, SCALE_x1);                // i0 = m_sr
+	UML_AND(block, I0, I0, u32(u16(~(SR_N | SR_Z | SR_V | SR_C))));    // clear N,Z,V,C
+	UML_OR(block, I0, I0, set_nz);                                     // set the constant N,Z
+	UML_STORE(block, &m_sr, 0, I0, SIZE_WORD, SCALE_x1);              // m_sr = ...
+	UML_LOAD(block, I0, &m_ir, 0, SIZE_WORD, SCALE_x1);               // i0 = m_ir
+	UML_STORE(block, &m_ird, 0, I0, SIZE_WORD, SCALE_x1);            // m_ird = m_ir
+	// if(m_next_state != S_TRACE) m_next_state = m_int_next_state;
+	// (computed through registers so the conditional move has a register dest --
+	// mem-dest MOVc is not uniformly supported across the UML backends)
+	UML_MOV(block, I0, mem(&m_next_state));                            // i0 = m_next_state (current value, kept if == S_TRACE)
+	UML_MOV(block, I1, mem(&m_int_next_state));                        // i1 = m_int_next_state
+	UML_CMP(block, mem(&m_next_state), u32(S_TRACE));
+	UML_MOVc(block, COND_NE, I0, I1);                                  // i0 = (next_state != S_TRACE) ? int_next_state : next_state
+	UML_MOV(block, mem(&m_next_state), I0);                            // m_next_state = i0
+	// m_base_ssw = SSW_PROGRAM | SSW_R
+	UML_MOV(block, I0, u32(u16(SSW_PROGRAM | SSW_R)));
+	UML_STORE(block, &m_base_ssw, 0, I0, SIZE_WORD, SCALE_x1);        // m_base_ssw = ...
+	// advance the substate so the interpreter resumes at CASE 1 (prefetch +
+	// cycle charge + suspend + dispatch) and does NOT re-run case 0
+	UML_MOV(block, I0, 1);
+	UML_STORE(block, &m_inst_substate, 0, I0, SIZE_WORD, SCALE_x1);   // m_inst_substate = 1
+
+	// --- hand CASE 1+2 (timing tail) to the interpreter for the granted quantum ---
+	UML_LABEL(block, lbl_delegate);
+	UML_CALLC(block, &m68000_device::cfunc_interpret_quantum, this);  // callc  cfunc_interpret_quantum,this
 	UML_EXIT(block, EXECUTE_OUT_OF_CYCLES);                           // exit   EXECUTE_OUT_OF_CYCLES
 }
