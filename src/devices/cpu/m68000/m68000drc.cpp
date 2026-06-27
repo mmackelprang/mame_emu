@@ -155,9 +155,19 @@ void m68000_device::static_generate_entry_point(drcuml_block &block)
 	UML_CMP(block, I0, 0);
 	UML_JMPc(block, COND_NE, lbl_delegate);                           // mid-state suspend -> interpreter
 
-	// m_ipc == m_pc - 2  (both u32)
-	UML_SUB(block, I0, mem(&m_pc), 2);                                // i0 = m_pc - 2
-	UML_CMP(block, I0, mem(&m_ipc));
+	// m_ipc == m_pc - 2  (both u32).
+	// NB: device-state fields are accessed via UML_LOAD/UML_STORE (a pointer
+	// base), NOT plain mem(&field) operands.  drcbe_x64 lowers a mem() operand
+	// RBP-relative and THROWS offset_from_rbp if the field is >2 GiB from the
+	// cache (the heap m68000_device vs the high-mmap'd executable drc_cache on
+	// Linux/SysV -- which silently fataled the oracle there while passing on
+	// Windows, where both allocations stay low).  LOAD/STORE route the base
+	// through get_base_register_and_offset, which falls back to an absolute
+	// pointer load and never throws -- correct on every OS.
+	UML_LOAD(block, I0, &m_pc, 0, SIZE_DWORD, SCALE_x1);               // i0 = m_pc
+	UML_SUB(block, I0, I0, 2);                                        // i0 = m_pc - 2
+	UML_LOAD(block, I1, &m_ipc, 0, SIZE_DWORD, SCALE_x1);              // i1 = m_ipc
+	UML_CMP(block, I0, I1);
 	UML_JMPc(block, COND_NE, lbl_delegate);                           // m_ipc not at the current opword -> interpreter
 
 	UML_LOAD(block, I7, &m_ird, 0, SIZE_WORD, SCALE_x1);               // i7 = m_ird (opword); kept across the fast-paths
@@ -274,20 +284,24 @@ void m68000_device::generate_moveq(drcuml_block &block)
 
 	// prefetch-pipe pointer advance (CASE 0):
 	//   m_aob = m_au; m_ir = m_irc; m_pc = m_au; m_au += 2; m_ird = m_ir;
-	UML_MOV(block, mem(&m_aob), mem(&m_au));                          // m_aob = m_au
+	// (all device-state access via UML_LOAD/UML_STORE -- see the note in
+	// static_generate_entry_point on why plain mem(&field) is avoided.)
+	UML_LOAD(block, I2, &m_au, 0, SIZE_DWORD, SCALE_x1);              // i2 = m_au
+	UML_STORE(block, &m_aob, 0, I2, SIZE_DWORD, SCALE_x1);            // m_aob = m_au
+	UML_STORE(block, &m_pc, 0, I2, SIZE_DWORD, SCALE_x1);             // m_pc = m_au
+	UML_ADD(block, I2, I2, 2);                                       // i2 = m_au + 2
+	UML_STORE(block, &m_au, 0, I2, SIZE_DWORD, SCALE_x1);             // m_au += 2
 	UML_LOAD(block, I0, &m_irc, 0, SIZE_WORD, SCALE_x1);              // i0 = m_irc
 	UML_STORE(block, &m_ir, 0, I0, SIZE_WORD, SCALE_x1);            // m_ir = m_irc
-	UML_MOV(block, mem(&m_pc), mem(&m_au));                           // m_pc = m_au
-	UML_ADD(block, mem(&m_au), mem(&m_au), 2);                        // m_au += 2
 	UML_STORE(block, &m_ird, 0, I0, SIZE_WORD, SCALE_x1);          // m_ird = m_ir (== old m_irc, in i0)
 
 	// if(m_next_state != S_TRACE) m_next_state = m_int_next_state;
 	// (register-dest conditional move -- mem-dest MOVc is not uniformly supported)
-	UML_MOV(block, I0, mem(&m_next_state));                          // i0 = m_next_state (kept if == S_TRACE)
-	UML_MOV(block, I1, mem(&m_int_next_state));                      // i1 = m_int_next_state
-	UML_CMP(block, mem(&m_next_state), u32(S_TRACE));
+	UML_LOAD(block, I0, &m_next_state, 0, SIZE_DWORD, SCALE_x1);     // i0 = m_next_state (kept if == S_TRACE)
+	UML_LOAD(block, I1, &m_int_next_state, 0, SIZE_DWORD, SCALE_x1); // i1 = m_int_next_state
+	UML_CMP(block, I0, u32(S_TRACE));
 	UML_MOVc(block, COND_NE, I0, I1);                                // i0 = (next_state != S_TRACE) ? int_next_state : next_state
-	UML_MOV(block, mem(&m_next_state), I0);                          // m_next_state = i0
+	UML_STORE(block, &m_next_state, 0, I0, SIZE_DWORD, SCALE_x1);    // m_next_state = i0
 
 	// m_base_ssw = SSW_PROGRAM | SSW_R
 	UML_MOV(block, I0, u32(u16(SSW_PROGRAM | SSW_R)));
