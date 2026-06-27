@@ -215,6 +215,17 @@ protected:
 	u32 m_post_run;
 	int m_post_run_cycles;
 
+	// DRC dispatcher exit codes (the values m_drcuml->execute() returns and the
+	// UML_EXIT operands the static handlers emit).  Single-sourced here so the
+	// dispatch loop (m68000.cpp) and the UML emission (m68000drc.cpp) can never
+	// drift -- a mismatch would silently wedge the dispatcher.
+	enum {
+		EXECUTE_OUT_OF_CYCLES = 0,
+		EXECUTE_MISSING_CODE  = 1,
+		EXECUTE_UNMAPPED_CODE = 2,
+		EXECUTE_RESET_CACHE   = 3
+	};
+
 	// --- DRC (UML recompiler) state ---
 	// Boundary L wires the dual-path execute_run() and a 100%-cfunc dispatcher:
 	// the compiled entry block does nothing but call a C function that runs the
@@ -225,22 +236,27 @@ protected:
 	drc_cache                  m_drc_cache;     // pointer to the DRC code cache
 	std::unique_ptr<drcuml_state> m_drcuml;     // DRC UML generator state
 	std::unique_ptr<frontend>  m_drcfe;         // pointer to the DRC front-end
-	uml::code_handle          *m_entry;         // entry point
-	uml::code_handle          *m_nocode;        // nocode handler
-	uml::code_handle          *m_out_of_cycles; // out of cycles exception handler
+	uml::code_handle          *m_entry;         // entry point (the single resident block)
 	u32                        m_drcoptions;    // configurable DRC options
-	bool                       m_cache_dirty;   // true if we need to flush the cache
+	bool                       m_cache_dirty;   // true if we need to (re)generate the resident block
 	bool                       m_isdrc;         // true if we're in DRC mode (latched from allow_drc())
+	int                        m_drc_labelnum;  // UML label counter for the resident block's code labels
 
 	// Typed constructor
 	m68000_device(const machine_config &mconfig, device_type type, const char *tag, device_t *owner, u32 clock);
 
-	// DRC plumbing
+	// DRC plumbing (execute_run_drc + the cfunc body live in m68000.cpp; the
+	// translator + resident-block machinery lives in m68000drc.cpp).  The
+	// dispatch is a SINGLE RESIDENT BLOCK with in-block opcode dispatch -- no
+	// per-PC compilation, no HASHJMP, so nothing is cached per PC (no flush, no
+	// stale-on-RAM-rewrite).
 	void execute_run_interpreter();             // the byte-unchanged microcode loop (interpreter arm + cfunc body)
-	void execute_run_drc();                     // the DRC arm: cache-flush + entry-block execute loop
-	void code_flush_cache();                    // flush the cache and regenerate the static handlers
-	void code_compile_block(offs_t pc);         // compile a block (dormant at boundary L; exercises the frontend)
-	void static_generate_entry_point();         // generate the entry / nocode / out_of_cycles handlers
+	void execute_run_drc();                     // the DRC arm: cache-flush-if-dirty + entry-block execute loop
+	void code_flush_cache();                    // (re)generate the single resident entry block
+	void static_generate_entry_point(drcuml_block &block);          // the resident block: in-block opcode dispatch
+	void generate_native_dispatch(drcuml_block &block, uml::code_label lbl_delegate); // emit the in-block native-opcode dispatch (I7 = opword)
+	void generate_moveq(drcuml_block &block);   // native UML for moveq #imm,Dn (boundary M's first native opcode; decodes m_ird at runtime)
+	static bool is_native_opcode(u16 opword);   // the predicate identifying opcodes with a native fast-path
 	void func_interpret_quantum();              // run the interpreter for the granted quantum (the cfunc body)
 	static void cfunc_interpret_quantum(void *param);
 
@@ -251,8 +267,9 @@ protected:
 	// (Defined out-of-line in m68000.cpp, where the M68000 device type is in scope.)
 	virtual bool drc_supported_for_type() const;
 
-	// allocate a UML code handle if not already allocated
-	static inline void alloc_handle(drcuml_state *drcuml, uml::code_handle **handleptr, const char *name);
+	// allocate a UML code handle if not already allocated (called from both
+	// m68000.cpp and m68000drc.cpp, so it is a non-inline out-of-line static)
+	static void alloc_handle(drcuml_state *drcuml, uml::code_handle **handleptr, const char *name);
 
 	// Create the decode table
 	void init_decode_table();
