@@ -14,13 +14,9 @@
 #include "emuopts.h"
 
 
-// DRC exit codes (local, mirroring ppcdrc.cpp / mips3drc.cpp).  The boundary-L
-// entry block only ever exits OUT_OF_CYCLES; the others exist for fidelity to
-// the template (the full execute_run_drc() switch handles them).
-#define EXECUTE_OUT_OF_CYCLES           0
-#define EXECUTE_MISSING_CODE            1
-#define EXECUTE_UNMAPPED_CODE           2
-#define EXECUTE_RESET_CACHE             3
+// The DRC dispatcher exit codes are the m68000_device::EXECUTE_* enum (declared
+// in m68000.h, single-sourced so the dispatch loop here and the UML emission in
+// m68000drc.cpp cannot drift).
 
 // DRC front-end compile-window constants (analogous to mips3/ppc).  68000
 // opcodes are 2..10 bytes; the window is expressed in bytes.

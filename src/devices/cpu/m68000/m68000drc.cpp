@@ -69,12 +69,9 @@ using namespace uml;
 //  CONSTANTS / LOCAL HELPERS
 //**************************************************************************
 
-// DRC exit codes (mirroring mips3com.h / ppc.h).  Defined in m68000.cpp as
-// well; kept consistent here.
-#define EXECUTE_OUT_OF_CYCLES           0
-#define EXECUTE_MISSING_CODE            1
-#define EXECUTE_UNMAPPED_CODE           2
-#define EXECUTE_RESET_CACHE             3
+// The DRC dispatcher exit codes are the m68000_device::EXECUTE_* enum (declared
+// in m68000.h), shared with the dispatch loop in m68000.cpp so the two cannot
+// drift.
 
 // Hashed-block map dimensions.  The plain 68000 has a single execution mode
 // (no banked address modes the DRC distinguishes), so we always hash on mode 0.
@@ -216,10 +213,15 @@ void m68000_device::code_compile_block(offs_t pc)
 			// small and unique within this block
 			m_drc_labelnum = 1;
 
-			// register the hash at EXACTLY the requested pc, so the entry block's
-			// HASHJMP(m_ipc) resolves here after this compile
-			if(!m_drcuml->hash_exists(M68K_DRC_MODE, pc))
-				UML_HASH(block, M68K_DRC_MODE, pc);                    // hash mode,pc
+			// Register the hash at EXACTLY the requested pc, so the entry block's
+			// HASHJMP(m_ipc) resolves here after this compile.  This is
+			// UNCONDITIONAL: code_compile_block is only reached on a HASHJMP miss
+			// (the entry/out_of_cycles handlers exit MISSING_CODE only when the
+			// hash is absent), so the hash never pre-exists.  Guarding it on
+			// !hash_exists would turn that invariant into a SILENT failure -- a
+			// block with no hash registration is unreachable via HASHJMP, so the
+			// dispatcher would spin on MISSING_CODE until the cache exhausts.
+			UML_HASH(block, M68K_DRC_MODE, pc);                       // hash mode,pc
 
 			// emit the per-PC body: native for the in-set opcodes, interpreter
 			// cfunc for the rest
@@ -322,8 +324,8 @@ void m68000_device::generate_interpreter_fallback(drcuml_block &block)
 void m68000_device::generate_moveq(drcuml_block &block, u16 opword)
 {
 	const int rx = (opword >> 9) & 7;
-	const u16 ftu = u16(s16(s8(opword & 0xff)));            // m_ftu at entry = s8(opword) in 16 bits
-	const u32 result = u32(s32(s16(ftu)));                  // ext32(m_ftu) -> sign-extended imm8 in 32 bits
+	const u16 ftu = u16(s8(opword & 0xff));                 // m_ftu at entry = s8(opword) sign-extended into 16 bits
+	const u32 result = u32(s32(s16(ftu)));                  // ext32(m_ftu) = s32(s16(m_ftu)) -> sign-extended imm8 in 32 bits
 	// sr_nzvc(): only N,Z can be set (V=C=0); X,I,S,T preserved.
 	const u32 set_nz = (ftu == 0 ? u32(SR_Z) : 0u) | ((ftu & 0x8000) ? u32(SR_N) : 0u);
 

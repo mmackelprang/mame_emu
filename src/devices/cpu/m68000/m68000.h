@@ -215,6 +215,17 @@ protected:
 	u32 m_post_run;
 	int m_post_run_cycles;
 
+	// DRC dispatcher exit codes (the values m_drcuml->execute() returns and the
+	// UML_EXIT operands the static handlers emit).  Single-sourced here so the
+	// dispatch loop (m68000.cpp) and the UML emission (m68000drc.cpp) can never
+	// drift -- a mismatch would silently wedge the dispatcher.
+	enum {
+		EXECUTE_OUT_OF_CYCLES = 0,
+		EXECUTE_MISSING_CODE  = 1,
+		EXECUTE_UNMAPPED_CODE = 2,
+		EXECUTE_RESET_CACHE   = 3
+	};
+
 	// --- DRC (UML recompiler) state ---
 	// Boundary L wires the dual-path execute_run() and a 100%-cfunc dispatcher:
 	// the compiled entry block does nothing but call a C function that runs the
