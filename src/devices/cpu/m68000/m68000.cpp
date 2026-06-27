@@ -248,10 +248,12 @@ void m68000_device::execute_run_interpreter()
 
 
 //**************************************************************************
-//  DRC DISPATCHER (boundary L: 100% cfunc, no native opcode emission)
+//  DRC DISPATCHER (boundary M: real per-PC dispatch; native UML for the
+//  in-set opcodes, interpreter cfunc for the rest -- the translator and the
+//  static-handler / block-compile machinery live in m68000drc.cpp)
 //**************************************************************************
 
-inline void m68000_device::alloc_handle(drcuml_state *drcuml, uml::code_handle **handleptr, const char *name)
+void m68000_device::alloc_handle(drcuml_state *drcuml, uml::code_handle **handleptr, const char *name)
 {
 	if(*handleptr == nullptr)
 		*handleptr = drcuml->handle_alloc(name);
@@ -271,11 +273,10 @@ void m68000_device::cfunc_interpret_quantum(void *param)
 }
 
 // The DRC arm of execute_run().  Mirrors ppc_device::execute_run /
-// mips3_device::execute_run for fidelity to the template.  Because the boundary-L
-// entry block ALWAYS runs the full interpreter quantum then exits OUT_OF_CYCLES,
-// the do/while loop runs the entry exactly once; the MISSING_CODE / RESET_CACHE
-// arms are kept (and never taken here) so boundary M can grow real per-opcode
-// compilation without restructuring this loop.
+// mips3_device::execute_run.  The entry block HASHJMPs on the live instruction
+// address (m_ipc) to the per-PC compiled block; a miss exits MISSING_CODE so
+// this loop JIT-compiles that block via code_compile_block(m_ipc).  The block /
+// static-handler / translator implementations live in m68000drc.cpp.
 void m68000_device::execute_run_drc()
 {
 	// reset the cache if dirty
@@ -289,114 +290,17 @@ void m68000_device::execute_run_drc()
 		// run as much as we can
 		execute_result = m_drcuml->execute(*m_entry);
 
-		// if we need to recompile, do it (dormant at boundary L: the entry block
-		// never hashjmps to nocode, so MISSING_CODE is never returned)
+		// the entry block / out_of_cycles handler record the resume instruction
+		// address in m_ipc; compile the missing block there (NOT m_pc, which is
+		// the prefetch pointer m_ipc+2)
 		if(execute_result == EXECUTE_MISSING_CODE)
-			code_compile_block(m_pc);
+			code_compile_block(m_ipc);
 		else if(execute_result == EXECUTE_UNMAPPED_CODE)
-			fatalerror("Attempted to execute unmapped code at PC=%08X\n", m_pc);
+			fatalerror("Attempted to execute unmapped code at PC=%08X\n", m_ipc);
 		else if(execute_result == EXECUTE_RESET_CACHE)
 			code_flush_cache();
 
 	} while(execute_result != EXECUTE_OUT_OF_CYCLES);
-}
-
-
-//-------------------------------------------------
-//  code_flush_cache - flush the cache and
-//  regenerate the static handlers
-//-------------------------------------------------
-
-void m68000_device::code_flush_cache()
-{
-	// empty the transient cache contents
-	m_drcuml->reset();
-
-	try {
-		// generate the entry point, nocode and out-of-cycles handlers
-		static_generate_entry_point();
-	}
-	catch(drcuml_block::abort_compilation &) {
-		fatalerror("Unrecoverable error generating m68000 static DRC code\n");
-	}
-}
-
-
-//-------------------------------------------------
-//  static_generate_entry_point - generate the
-//  entry / nocode / out_of_cycles handlers
-//-------------------------------------------------
-
-void m68000_device::static_generate_entry_point()
-{
-	// forward references
-	alloc_handle(m_drcuml.get(), &m_nocode, "nocode");
-	alloc_handle(m_drcuml.get(), &m_out_of_cycles, "out_of_cycles");
-	alloc_handle(m_drcuml.get(), &m_entry, "entry");
-
-	// --- entry block ---
-	// 100% cfunc: run the interpreter for the granted quantum, then exit
-	// OUT_OF_CYCLES.  No HASHJMP-per-PC dispatch, no register/EA mapping.
-	{
-		drcuml_block &block(m_drcuml->begin_invariant_block(20));
-		UML_HANDLE(block, *m_entry);                                  // handle  entry
-		UML_CALLC(block, &m68000_device::cfunc_interpret_quantum, this); // callc cfunc_interpret_quantum,this
-		UML_EXIT(block, EXECUTE_OUT_OF_CYCLES);                       // exit    EXECUTE_OUT_OF_CYCLES
-		block.end();
-	}
-
-	// --- nocode handler ---
-	// Kept for template completeness; the entry block never jumps here in
-	// boundary L (boundary M's per-opcode HASHJMPs will).
-	{
-		drcuml_block &block(m_drcuml->begin_invariant_block(10));
-		UML_HANDLE(block, *m_nocode);                                 // handle  nocode
-		UML_EXIT(block, EXECUTE_MISSING_CODE);                        // exit    EXECUTE_MISSING_CODE
-		block.end();
-	}
-
-	// --- out-of-cycles handler ---
-	{
-		drcuml_block &block(m_drcuml->begin_invariant_block(10));
-		UML_HANDLE(block, *m_out_of_cycles);                          // handle  out_of_cycles
-		UML_EXIT(block, EXECUTE_OUT_OF_CYCLES);                       // exit    EXECUTE_OUT_OF_CYCLES
-		block.end();
-	}
-}
-
-
-//-------------------------------------------------
-//  code_compile_block - compile a block at pc
-//
-//  Boundary L: effectively dormant -- the entry block exits OUT_OF_CYCLES
-//  without ever hashjmp'ing to nocode, so this is never reached during normal
-//  execution.  It is implemented minimally so the frontend is on a real (if
-//  dormant) path: it describes the block (exercising m68000fe) and emits a
-//  no-op block that exits OUT_OF_CYCLES.  Boundary M replaces this with real
-//  per-opcode UML emission.
-//-------------------------------------------------
-
-void m68000_device::code_compile_block(offs_t pc)
-{
-	// exercise the frontend on the real describe path
-	const opcode_desc *desclist = m_drcfe->describe_code(pc);
-	(void)desclist;
-
-	bool succeeded = false;
-	while(!succeeded) {
-		try {
-			drcuml_block &block(m_drcuml->begin_block(64));
-			// no per-opcode emission at boundary L; just exit so the dispatcher
-			// loop terminates (this never loops because the entry block does not
-			// return MISSING_CODE)
-			UML_EXIT(block, EXECUTE_OUT_OF_CYCLES);                   // exit    EXECUTE_OUT_OF_CYCLES
-			block.end();
-			succeeded = true;
-		}
-		catch(drcuml_block::abort_compilation &) {
-			code_flush_cache();
-		}
-	}
 }
 
 device_memory_interface::space_config_vector m68000_device::memory_logical_space_config() const

@@ -235,12 +235,17 @@ protected:
 	// Typed constructor
 	m68000_device(const machine_config &mconfig, device_type type, const char *tag, device_t *owner, u32 clock);
 
-	// DRC plumbing
+	// DRC plumbing (execute_run_drc + the cfunc bodies live in m68000.cpp; the
+	// translator + static-handler / block-compile machinery lives in m68000drc.cpp)
 	void execute_run_interpreter();             // the byte-unchanged microcode loop (interpreter arm + cfunc body)
 	void execute_run_drc();                     // the DRC arm: cache-flush + entry-block execute loop
 	void code_flush_cache();                    // flush the cache and regenerate the static handlers
-	void code_compile_block(offs_t pc);         // compile a block (dormant at boundary L; exercises the frontend)
-	void static_generate_entry_point();         // generate the entry / nocode / out_of_cycles handlers
+	void code_compile_block(offs_t pc);         // compile the per-PC block at the given instruction address
+	void static_generate_entry_point(drcuml_block &block);         // entry: HASHJMP on m_ipc to the per-PC block
+	void static_generate_nocode_handler(drcuml_block &block);      // HASHJMP miss: record PC, exit MISSING_CODE
+	void static_generate_out_of_cycles(drcuml_block &block);       // suspend: record PC, exit OUT_OF_CYCLES
+	void generate_opcode(drcuml_block &block, const opcode_desc *desc);             // emit UML for one instruction (native or cfunc)
+	void generate_interpreter_fallback(drcuml_block &block, const opcode_desc *desc); // run the interpreter for this one instruction
 	void func_interpret_quantum();              // run the interpreter for the granted quantum (the cfunc body)
 	static void cfunc_interpret_quantum(void *param);
 
@@ -251,8 +256,9 @@ protected:
 	// (Defined out-of-line in m68000.cpp, where the M68000 device type is in scope.)
 	virtual bool drc_supported_for_type() const;
 
-	// allocate a UML code handle if not already allocated
-	static inline void alloc_handle(drcuml_state *drcuml, uml::code_handle **handleptr, const char *name);
+	// allocate a UML code handle if not already allocated (called from both
+	// m68000.cpp and m68000drc.cpp, so it is a non-inline out-of-line static)
+	static void alloc_handle(drcuml_state *drcuml, uml::code_handle **handleptr, const char *name);
 
 	// Create the decode table
 	void init_decode_table();
