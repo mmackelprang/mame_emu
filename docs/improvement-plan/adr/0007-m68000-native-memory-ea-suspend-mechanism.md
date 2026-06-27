@@ -1,6 +1,8 @@
 # ADR 0007 — m68000 DRC native memory-EA + suspend / cycle / address-error mechanism
 
-> **Status:** Proposed · **Phase:** P2 · **Owner:** TBD (the boundary-M owner committed to building it)
+> **Status:** Accepted (all 5 open questions resolved by the owner; O-mem-1 planned —
+> see [`plan/phase-2-o-mem-1-btst-absolute.md`](../plan/phase-2-o-mem-1-btst-absolute.md)) ·
+> **Phase:** P2 · **Owner:** the boundary-M owner (committed to building it)
 > **Type:** Addendum to **[0002](0002-m68000-drcuml-port.md)** (it implements 0002 §3's
 > "cycle-accuracy strategy" for the *memory-addressing* half of the ISA, which 0002 deferred
 > wholesale to `cfunc_`).
@@ -516,29 +518,42 @@ edge timings that don't match go straight back to `cfunc_` (never approximated).
   native-coverage assertion includes it, benchmark shows the expected speedup on the named driver,
   generator round-trip additive-only.
 
-## Open questions (for the owner before Planner runs)
+## Open questions — RESOLVED (owner-locked; baked into the O-mem-1 plan)
 
-1. **OQ-1 — native resume, or interpreter resume after a mid-instruction yield?** Recommendation:
-   **interpreter resume** (the boundary-M `m_inst_substate==0` guard already routes resuming
-   instructions to the interpreter; native path emits the suspend checkpoint and yields, does not emit
-   the resume). Simpler, already Leg-B-correct, fully native on the (dominant) fully-granted case.
-   Confirm we don't need native resume for the throughput bar (we shouldn't — real quanta are large).
-2. **OQ-2 — generator step-descriptor shape.** Extend `m68000gen.py` to emit a per-opcode ordered
-   bus-step list (access kind/size/lane, `−N`, redo/completed substate pair) into the descriptor
-   table — the single-source-of-truth route — *vs.* a hand-written step table for just the
-   btst-absolute family in O-mem-1 to de-risk the schedule, generator-single-sourced in a fast
-   follow. Recommendation: **attempt the generator extension first** (single source), with the
-   hand-written table as the documented fallback if it slips, never as the long-run state.
-3. **OQ-3 — `(xxx).L` vs `(xxx).W` in the first batch.** Ship both absolute sizes in O-mem-1 (they
-   differ only by one extra prefetch step, so the mechanism is identical), or `.W` only first?
-   Recommendation: **both** — the extra `.L` prefetch step exercises the multi-read suspend path the
-   mechanism must handle anyway, and `.W` alone would leave a trivially-adjacent opcode `cfunc_`.
-4. **OQ-4 — factor `generate_bus_step()` into a shared `UML_CALLH` subroutine, or inline?**
-   Recommendation: **inline straight-line emission** for O-mem-1…2; factor a shared helper only after
-   the common sub-shape is empirically stable (mirrors mips3/ppc's post-hoc factoring). Confirm the
-   owner is comfortable with the temporary code-size cost.
-5. **OQ-5 — `access_to_be_redone()` access method.** Confirm the `UML_CALLC` read-and-clear cfunc
-   (preserving the interpreter's clear semantics) over `UML_LOAD`-ing the private field
-   (semantically wrong — wouldn't clear) or adding a new clearing accessor to `cpu_device` (a
-   shared-core change with broader blast radius). Recommendation: **the cfunc** (cold path, zero hot
-   cost, exact semantics, no core change).
+All five are decided. The O-mem-1 plan
+([`plan/phase-2-o-mem-1-btst-absolute.md`](../plan/phase-2-o-mem-1-btst-absolute.md)) implements
+these answers; they are not re-litigated.
+
+1. **OQ-1 — native resume, or interpreter resume after a mid-instruction yield? → RESOLVED:
+   interpreter resume.** The native path emits the suspend checkpoint and **yields** (`UML_JMP` to the
+   interpreter delegate); it does **not** emit a native resume. This is already Leg-B-correct via the
+   boundary-M `m_inst_substate==0` guard (a resuming instruction is routed to the interpreter delegate),
+   and it is fully native on the dominant fully-granted case (a real driver grants a large quantum, so all
+   four/five reads run native in one pass). Native resume is not needed for the throughput bar (real quanta
+   are large; only the oracle's pathological one-cycle stepping yields mid-instruction). *Plan: Task 3 (the
+   emitter yields, never resumes).*
+2. **OQ-2 — generator step-descriptor shape? → RESOLVED: extend `m68000gen.py` (generator-first,
+   single source).** The generator emits the per-opcode ordered bus-step list (access kind/size/lane, `−N`,
+   redo/completed substate pair) from the **same microcode walk** that generates the interpreter handler, so
+   the DRC's charges and substates cannot drift from the interpreter's. A hand-written btst-only step table
+   is a **documented temporary fallback only** (if the generator extension slips the schedule, R-B above),
+   never the long-run state. *Plan: Task 1 (additive generator extension; empty diff on existing generated
+   files).*
+3. **OQ-3 — `(xxx).L` vs `(xxx).W` in the first batch? → RESOLVED: both in O-mem-1.** They differ
+   only by one extra absolute-address prefetch step, so the mechanism is identical; the extra `.L` read
+   exercises the multi-read suspend path the mechanism must handle anyway, and `.W`-alone would leave a
+   trivially-adjacent opcode `cfunc_`. *Plan: Task 4 (two compile-time arms, `.W` substates 1–8, `.L`
+   substates 1–10).*
+4. **OQ-4 — factor `generate_bus_step()` into a shared `UML_CALLH` subroutine, or inline? →
+   RESOLVED: inline straight-line emission first.** `generate_bus_step()` is emitted inline (trivially
+   auditable against the interpreter handler) for O-mem-1; factoring a shared helper is deferred to a later
+   batch once the common sub-shape is empirically stable (mirrors mips3/ppc's post-hoc factoring of
+   `static_generate_memory_accessor`). The temporary code-size cost is accepted. *Plan: Task 3 (inline
+   emitter, not a `UML_CALLH`).*
+5. **OQ-5 — `access_to_be_redone()` access method? → RESOLVED: cold-path `cfunc_` read-and-clear.**
+   The redo flag is read via a tiny `cfunc_take_access_to_be_redone` that calls the public
+   `access_to_be_redone()` (preserving the interpreter's exact read-and-clear `std::exchange` semantics) and
+   parks the boolean in a DRC-owned scratch byte (`m_drc_redo_scratch`). One `UML_CALLC` on the **cold**
+   suspend path only (zero hot-path cost); no shared `cpu_device` change. `UML_LOAD`-ing the private field
+   (semantically wrong — would not clear) and adding a new clearing accessor to `cpu_device` (broader blast
+   radius) are both rejected. *Plan: Task 2 (the cfunc + scratch field), consumed by Task 3.*
