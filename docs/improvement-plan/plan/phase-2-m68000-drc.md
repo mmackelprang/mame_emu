@@ -197,15 +197,25 @@ PR, but `./mame -validate` and the interpreter leg must remain green.)
 > **PR boundary M** (Task 5): first native UML emission for the common-path set. **The
 > headline increment.** Merge only on a green dual-leg oracle across the backend matrix
 > (Task 8).
-> **✅ Shipped.** Boundary M lands two things: (1) the **real per-PC native DISPATCH** —
-> `m68000drc.cpp`'s entry block HASHJMPs on the live instruction address (`m_ipc`) to a
-> per-PC compiled block, with `nocode` / `out_of_cycles` static handlers and an on-demand
-> `code_compile_block`, replacing boundary L's single 100%-`cfunc_` block (mips3/ppc
-> pattern); and (2) the **first native opcode — `moveq`** — emitted as native UML.
+> **✅ Shipped.** Boundary M lands two things: (1) a **native DISPATCH via a single resident
+> UML block** — `m68000drc.cpp`'s entry block decodes the current opword (`m_ird`) in-line
+> and runs a native fast-path or delegates the granted quantum to the interpreter, replacing
+> boundary L's single 100%-`cfunc_` block. It deliberately does **not** compile a block per
+> PC / HASHJMP on `m_ipc`: the corpus scatters ~310 k distinct PCs, so per-PC compilation
+> overran the 8 MiB code cache and forced flushes that were fragile across UML backends (it
+> failed the appserver Linux/SysV `oracle` job — a flush-time `emu_fatalerror` escaped and
+> was swallowed by `running_machine::run()` — while passing on Windows, which had cache
+> headroom), and per-PC blocks went stale when the harness rewrote program RAM per case. A
+> single resident block that decodes `m_ird` at runtime has neither problem. The native
+> fast-path runs ONLY at a genuine instruction-fetch boundary, gated by three guards
+> (`m_inst_substate==0`; `m_ipc==m_pc-2` — the guard against a prior multi-state opcode's
+> retirement grant, where the next opword is already prefetched into `m_ird`;
+> `m_inst_state==m_decode_table[m_ird]` — not mid multi-state). And (2) the **first native
+> opcode — `moveq`** (decoded from `m_ird` at runtime) — emitted as native UML.
 > `moveq`'s native path uses a **hybrid handoff**: it emits the interpreter microcode's
 > CASE 0 natively (the architectural artifact — the `Dn` write, the CCR `N/Z` with `V=C=0`
-> and `X/I/S/T` preserved, and the prefetch-pipe pointer advance — all compile-time
-> constants of the opcode word), then sets `m_inst_substate=1` and hands the timing tail
+> and `X/I/S/T` preserved, and the prefetch-pipe pointer advance), then sets
+> `m_inst_substate=1` and hands the timing tail
 > (CASE 1+2: the interruptible prefetch, the `m_icount-=4` **cycle charge taken from the
 > interpreter, never re-estimated**, the suspend/payback bookkeeping, and the decode-table
 > dispatch) to the **unchanged interpreter** via the quantum `cfunc_`. This keeps the
