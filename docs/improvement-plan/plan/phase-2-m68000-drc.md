@@ -3,7 +3,7 @@
 > **Status:** In progress — **PR boundaries K + L + M shipped** (Tasks 1–5) · **Consumes:** ADR [0002](../adr/0002-m68000-drcuml-port.md)
 > **Hard gate:** ADR [0001](../adr/0001-differential-cpu-oracle.md) — the m68000 oracle
 > **Spec:** [`../specs/2026-06-24-mame-improvements-design.md`](../specs/2026-06-24-mame-improvements-design.md)
-> **Date:** 2026-06-24 · **Last updated:** 2026-06-27 (boundary M shipped — single resident-block DISPATCH + the first native opcode (moveq) via hybrid handoff; dual-leg cycle-exact on x64 + C backends. **The memory-EA half — the hot path — is now designed in [ADR 0007](../adr/0007-m68000-native-memory-ea-suspend-mechanism.md), which boundary O / Task 10 depends on.**)
+> **Date:** 2026-06-24 · **Last updated:** 2026-06-27 (boundary M shipped — single resident-block DISPATCH + the first native opcode (moveq) via hybrid handoff; dual-leg cycle-exact on x64 + C backends. **The memory-EA half — the hot path — is now designed in [ADR 0007](../adr/0007-m68000-native-memory-ea-suspend-mechanism.md) (all 5 open questions resolved), and boundary O / Task 10's first batch (O-mem-1) is fully planned in [`phase-2-o-mem-1-btst-absolute.md`](phase-2-o-mem-1-btst-absolute.md) — ready for Builder.**)
 
 ## Goal
 
@@ -324,7 +324,11 @@ PR, but `./mame -validate` and the interpreter leg must remain green.)
   more opcodes, **re-validated by the oracle every step**. **ADR 0007's ordered batch plan:**
   - **O-mem-1** (the mechanism PR — lands first and alone): `generate_bus_step()` infra +
     **`btst #n,(xxx).W/.L`** (the profiled hot opcode). Reviewed in isolation against Leg B on the
-    full backend matrix before any reuse.
+    full backend matrix before any reuse. **PLANNED — full task arc in
+    [`phase-2-o-mem-1-btst-absolute.md`](phase-2-o-mem-1-btst-absolute.md)** (5 tasks: generator
+    bus-step descriptor → redo-flag cfunc → `generate_bus_step()` emitter → wire btst-absolute →
+    coverage assertion + Linux `oracle` gate). ADR 0007's 5 open questions are resolved/locked.
+    **Ready for Builder.**
   - **O-mem-2:** `btst`/`bchg`/`bclr`/`bset` with `(An)`/`(An)+`/`-(An)` (adds the write checkpoint /
     RMW path).
   - **O-mem-3:** memory-EA `MOVE`/`MOVEA` (`.b`/`.w`/`.l`) — the broadest coverage jump.
