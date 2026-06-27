@@ -236,29 +236,27 @@ protected:
 	drc_cache                  m_drc_cache;     // pointer to the DRC code cache
 	std::unique_ptr<drcuml_state> m_drcuml;     // DRC UML generator state
 	std::unique_ptr<frontend>  m_drcfe;         // pointer to the DRC front-end
-	uml::code_handle          *m_entry;         // entry point
-	uml::code_handle          *m_nocode;        // nocode handler
-	uml::code_handle          *m_out_of_cycles; // out of cycles exception handler
+	uml::code_handle          *m_entry;         // entry point (the single resident block)
 	u32                        m_drcoptions;    // configurable DRC options
-	bool                       m_cache_dirty;   // true if we need to flush the cache
+	bool                       m_cache_dirty;   // true if we need to (re)generate the resident block
 	bool                       m_isdrc;         // true if we're in DRC mode (latched from allow_drc())
-	int                        m_drc_labelnum;  // monotonic UML label counter for per-block code labels
+	int                        m_drc_labelnum;  // UML label counter for the resident block's code labels
 
 	// Typed constructor
 	m68000_device(const machine_config &mconfig, device_type type, const char *tag, device_t *owner, u32 clock);
 
-	// DRC plumbing (execute_run_drc + the cfunc bodies live in m68000.cpp; the
-	// translator + static-handler / block-compile machinery lives in m68000drc.cpp)
+	// DRC plumbing (execute_run_drc + the cfunc body live in m68000.cpp; the
+	// translator + resident-block machinery lives in m68000drc.cpp).  The
+	// dispatch is a SINGLE RESIDENT BLOCK with in-block opcode dispatch -- no
+	// per-PC compilation, no HASHJMP, so nothing is cached per PC (no flush, no
+	// stale-on-RAM-rewrite).
 	void execute_run_interpreter();             // the byte-unchanged microcode loop (interpreter arm + cfunc body)
-	void execute_run_drc();                     // the DRC arm: cache-flush + entry-block execute loop
-	void code_flush_cache();                    // flush the cache and regenerate the static handlers
-	void code_compile_block(offs_t pc);         // compile the per-PC block at the given instruction address
-	void static_generate_entry_point(drcuml_block &block);         // entry: HASHJMP on m_ipc to the per-PC block
-	void static_generate_nocode_handler(drcuml_block &block);      // HASHJMP miss: record PC, exit MISSING_CODE
-	void static_generate_out_of_cycles(drcuml_block &block);       // suspend: record PC, exit OUT_OF_CYCLES
-	void generate_opcode(drcuml_block &block, u16 opword);          // emit UML for one instruction (native or cfunc)
-	void generate_interpreter_fallback(drcuml_block &block);       // run the interpreter for the granted quantum
-	void generate_moveq(drcuml_block &block, u16 opword);          // native UML for moveq #imm,Dn (boundary M's first native opcode)
+	void execute_run_drc();                     // the DRC arm: cache-flush-if-dirty + entry-block execute loop
+	void code_flush_cache();                    // (re)generate the single resident entry block
+	void static_generate_entry_point(drcuml_block &block);          // the resident block: in-block opcode dispatch
+	void generate_native_dispatch(drcuml_block &block, uml::code_label lbl_delegate); // emit the in-block native-opcode dispatch (I7 = opword)
+	void generate_moveq(drcuml_block &block);   // native UML for moveq #imm,Dn (boundary M's first native opcode; decodes m_ird at runtime)
+	static bool is_native_opcode(u16 opword);   // the predicate identifying opcodes with a native fast-path
 	void func_interpret_quantum();              // run the interpreter for the granted quantum (the cfunc body)
 	static void cfunc_interpret_quantum(void *param);
 

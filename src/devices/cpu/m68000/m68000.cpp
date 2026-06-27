@@ -54,8 +54,6 @@ m68000_device::m68000_device(const machine_config &mconfig, device_type type, co
 	  m_disable_interrupt_callback(false),
 	  m_drc_cache(DRC_CACHE_SIZE),
 	  m_entry(nullptr),
-	  m_nocode(nullptr),
-	  m_out_of_cycles(nullptr),
 	  m_drcoptions(0),
 	  m_cache_dirty(true),
 	  m_isdrc(false),
@@ -269,14 +267,16 @@ void m68000_device::cfunc_interpret_quantum(void *param)
 	static_cast<m68000_device *>(param)->func_interpret_quantum();
 }
 
-// The DRC arm of execute_run().  Mirrors ppc_device::execute_run /
-// mips3_device::execute_run.  The entry block HASHJMPs on the live instruction
-// address (m_ipc) to the per-PC compiled block; a miss exits MISSING_CODE so
-// this loop JIT-compiles that block via code_compile_block(m_ipc).  The block /
-// static-handler / translator implementations live in m68000drc.cpp.
+// The DRC arm of execute_run().  The dispatch is a SINGLE RESIDENT BLOCK
+// (m68000drc.cpp): the entry block decodes the current opcode in-line and runs
+// a native fast-path or delegates to the interpreter, then exits OUT_OF_CYCLES.
+// There is no per-PC compilation and the entry block never returns MISSING_CODE,
+// so the loop runs the resident block exactly once per granted quantum.  The
+// MISSING_CODE / RESET_CACHE arms are retained for template fidelity (and a
+// possible future per-PC fast-path) but are never taken here.
 void m68000_device::execute_run_drc()
 {
-	// reset the cache if dirty
+	// (re)generate the resident block if dirty
 	if(m_cache_dirty)
 		code_flush_cache();
 	m_cache_dirty = false;
@@ -287,12 +287,7 @@ void m68000_device::execute_run_drc()
 		// run as much as we can
 		execute_result = m_drcuml->execute(*m_entry);
 
-		// the entry block / out_of_cycles handler record the resume instruction
-		// address in m_ipc; compile the missing block there (NOT m_pc, which is
-		// the prefetch pointer m_ipc+2)
-		if(execute_result == EXECUTE_MISSING_CODE)
-			code_compile_block(m_ipc);
-		else if(execute_result == EXECUTE_UNMAPPED_CODE)
+		if(execute_result == EXECUTE_UNMAPPED_CODE)
 			fatalerror("Attempted to execute unmapped code at PC=%08X\n", m_ipc);
 		else if(execute_result == EXECUTE_RESET_CACHE)
 			code_flush_cache();
@@ -521,12 +516,10 @@ void m68000_device::device_start()
 		// initialise the front-end helper
 		m_drcfe = std::make_unique<frontend>(this, COMPILE_BACKWARDS_BYTES, COMPILE_FORWARDS_BYTES, COMPILE_MAX_SEQUENCE);
 
-		// the handles are allocated lazily in code_flush_cache via alloc_handle
+		// the entry handle is allocated lazily in code_flush_cache via alloc_handle
 		m_entry = nullptr;
-		m_nocode = nullptr;
-		m_out_of_cycles = nullptr;
 
-		// mark the cache dirty so the static handlers are generated on first execute
+		// mark dirty so the resident entry block is generated on first execute
 		m_cache_dirty = true;
 	}
 }
