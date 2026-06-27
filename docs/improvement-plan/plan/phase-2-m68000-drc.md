@@ -173,7 +173,7 @@ PR, but `./mame -validate` and the interpreter leg must remain green.)
 > Invocation: `./mametests "[m68000]"` (Leg A) · `./mametests "[m68000][drc]"` (Leg B x64) ·
 > `CPUORACLE_M68_DRC_C=1 ./mametests "[m68000][drc]"` (Leg B C backend). **Boundary M is next.**
 
-### Task 5 — `m68000drc.cpp`: emit native UML for the common-path opcode set
+### Task 5 — `m68000drc.cpp`: emit native UML for the common-path opcode set 🚀 IN-FLIGHT (PR boundary M)
 
 - **Files (new):** `src/devices/cpu/m68000/m68000drc.cpp`.
 - **Files (edit):** `scripts/src/cpu.lua` (register the new file); `m68000.cpp` /
