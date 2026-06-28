@@ -312,3 +312,95 @@ void m68000_device::generate_moveq(drcuml_block &block)
 	UML_MOV(block, I0, 1);
 	UML_STORE(block, &m_inst_substate, 0, I0, SIZE_WORD, SCALE_x1);  // m_inst_substate = 1
 }
+
+//-------------------------------------------------
+//  generate_bus_step - emit ONE native 68000 bus
+//  read step: UML_READ + the interpreter's exact
+//  per-bus-cycle checkpoint (charge, two-way
+//  suspend, address-error).  The CALLER has already
+//  emitted the step's address / m_base_ssw setup.
+//  On suspend or fault this stores the descriptor's
+//  substate (or S_ADDRESS_ERROR) and JMPs to
+//  lbl_delegate (yield -> interpreter resumes, OQ-1).
+//  On the clean path it falls through with the read
+//  byte/word committed.  Clobbers I0-I6; preserves I7.
+//-------------------------------------------------
+
+void m68000_device::generate_bus_step(drcuml_block &block, const struct drc_bus_step &step, uml::code_label lbl_delegate)
+{
+	uml::code_label const lbl_not_suspended = m_drc_labelnum++;
+	uml::code_label const lbl_completed     = m_drc_labelnum++;
+	uml::code_label const lbl_no_fault      = m_drc_labelnum++;
+
+	// address = m_aob & ~1  (the interpreter reads the word at the even address)
+	UML_LOAD(block, I1, &m_aob, 0, SIZE_DWORD, SCALE_x1);            // i1 = m_aob
+	UML_AND(block, I2, I1, ~u32(1));                                 // i2 = m_aob & ~1
+
+	// THE READ.  Both prefetch and data reads go through SPACE_PROGRAM (the
+	// 68000 has one program space; the SSW_PROGRAM/SSW_DATA difference is an
+	// architectural field the caller wrote, not a UML space selection).  Read
+	// the word; the data read then selects a byte lane.
+	UML_READ(block, I0, I2, SIZE_WORD, SPACE_PROGRAM);              // i0 = read word at (m_aob & ~1)
+
+	if(step.byte_lane)
+	{
+		// m_edb = read; if(!(m_aob & 1)) m_edb >>= 8; then keep the low byte.
+		// (m_aob&1 ? low byte : high byte) -- matches the interpreter's lane mask
+		// 0x00ff/0xff00 + the ">>8 when even" select.
+		uml::code_label const lbl_odd = m_drc_labelnum++;
+		uml::code_label const lbl_lane_done = m_drc_labelnum++;
+		UML_TEST(block, I1, 1);                                     // m_aob & 1 ?
+		UML_JMPc(block, COND_NZ, lbl_odd);                          // odd -> low byte already in place
+			UML_SHR(block, I0, I0, 8);                              // even -> high byte to low
+		UML_LABEL(block, lbl_odd);
+		UML_AND(block, I0, I0, 0xff);                               // keep the selected byte
+		UML_LABEL(block, lbl_lane_done);
+	}
+
+	// commit the read into m_edb (the interpreter stores read result in m_edb)
+	UML_STORE(block, &m_edb, 0, I0, SIZE_DWORD, SCALE_x1);          // m_edb = read
+
+	// m_icount -= charge
+	UML_LOAD(block, I3, &m_icount, 0, SIZE_DWORD, SCALE_x1);        // i3 = m_icount
+	UML_SUB(block, I3, I3, step.charge);                            // i3 -= N
+	UML_STORE(block, &m_icount, 0, I3, SIZE_DWORD, SCALE_x1);       // m_icount = i3
+
+	// --- suspend checkpoint: if(m_icount <= 0) ---
+	UML_CMP(block, I3, 0);
+	UML_JMPc(block, COND_G, lbl_not_suspended);                    // m_icount > 0 -> no suspend
+		// out of budget this bus cycle: read-and-clear the redo flag (cold path)
+		UML_CALLC(block, &m68000_device::cfunc_take_access_to_be_redone, this);
+		UML_LOAD(block, I4, &m_drc_redo_scratch, 0, SIZE_BYTE, SCALE_x1); // i4 = redo?
+		UML_CMP(block, I4, 0);
+		UML_JMPc(block, COND_E, lbl_completed);                    // !redo -> read completed
+			// redo: refund the charge and replay THIS read on resume
+			UML_LOAD(block, I3, &m_icount, 0, SIZE_DWORD, SCALE_x1);
+			UML_ADD(block, I3, I3, step.charge);                   // m_icount += N (refund)
+			UML_STORE(block, &m_icount, 0, I3, SIZE_DWORD, SCALE_x1);
+			UML_MOV(block, I5, step.redo_substate);
+			UML_STORE(block, &m_inst_substate, 0, I5, SIZE_WORD, SCALE_x1);
+			UML_JMP(block, lbl_delegate);                          // yield -> interpreter resumes at redo substate
+		UML_LABEL(block, lbl_completed);
+			UML_MOV(block, I5, step.completed_substate);
+			UML_STORE(block, &m_inst_substate, 0, I5, SIZE_WORD, SCALE_x1);
+			UML_JMP(block, lbl_delegate);                          // yield -> read DID happen, resume after it
+	UML_LABEL(block, lbl_not_suspended);
+
+	// --- address-error branch (PROGRAM reads only): if(m_aob & 1) ---
+	if(step.has_addr_error)
+	{
+		UML_TEST(block, I1, 1);                                     // m_aob & 1 ?
+		UML_JMPc(block, COND_Z, lbl_no_fault);                     // even -> no fault
+			// the interpreter's extra -4 on fault, then transition to S_ADDRESS_ERROR
+			UML_LOAD(block, I3, &m_icount, 0, SIZE_DWORD, SCALE_x1);
+			UML_SUB(block, I3, I3, 4);
+			UML_STORE(block, &m_icount, 0, I3, SIZE_DWORD, SCALE_x1);
+			UML_MOV(block, I5, u32(S_ADDRESS_ERROR));
+			UML_STORE(block, &m_inst_state, 0, I5, SIZE_WORD, SCALE_x1);
+			UML_JMP(block, lbl_delegate);                          // route the group-0 frame to the interpreter
+		UML_LABEL(block, lbl_no_fault);
+	}
+
+	// clean path: m_edb is committed; the caller continues to the next step
+	// (m_irc/m_dbin commit and any ALU are emitted by the opcode emitter).
+}

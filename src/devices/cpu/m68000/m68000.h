@@ -257,6 +257,7 @@ protected:
 	void static_generate_entry_point(drcuml_block &block);          // the resident block: in-block opcode dispatch
 	void generate_native_dispatch(drcuml_block &block, uml::code_label lbl_delegate); // emit the in-block native-opcode dispatch (I7 = opword)
 	void generate_moveq(drcuml_block &block);   // native UML for moveq #imm,Dn (boundary M's first native opcode; decodes m_ird at runtime)
+	void generate_bus_step(drcuml_block &block, const struct drc_bus_step &step, uml::code_label lbl_delegate); // one native 68000 bus read step (ADR 0007)
 	static bool is_native_opcode(u16 opword);   // the predicate identifying opcodes with a native fast-path
 	void func_interpret_quantum();              // run the interpreter for the granted quantum (the cfunc body)
 	static void cfunc_interpret_quantum(void *param);
