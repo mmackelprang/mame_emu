@@ -74,12 +74,15 @@ insensitive cycle cost and no fault surface in user mode:
 
 - Indexed / brief-extension modes `(d8,An,Xn)` (`dais`) and `(d8,PC,Xn)` (`dpci`) — the
   index extension word's timing and the scaled-index path are deferred.
-- Absolute modes `(xxx).W` / `(xxx).L` (`adr16` / `adr32`) — deferred to a later increment.
+- Absolute modes `(xxx).W` / `(xxx).L` (`adr16` / `adr32`) — `btst #n,(xxx).W/.L` is the
+  first native absolute-EA opcode (O-mem-1, via `generate_bus_step()`); all other
+  absolute-EA opcodes remain `cfunc_`, deferred to later O-mem increments.
 - All `movem` register lists (`list` / `listp`), `movep`, `link` / `unlk`, `pea` / `lea`,
   `exg`, `ext`, `swap`, `jmp` / `jsr`, `dbcc`, `chk`, shifts/rotates
   (`asl`/`asr`/`lsl`/`lsr`/`rol`/`ror`/`roxl`/`roxr`), multiply/divide
   (`muls`/`mulu`/`divs`/`divu`), BCD (`abcd`/`sbcd`/`nbcd`), extended ALU
-  (`addx`/`subx`/`negx`), bit ops (`btst`/`bchg`/`bclr`/`bset`), `tas`, and the
+  (`addx`/`subx`/`negx`), bit ops `btst`/`bchg`/`bclr`/`bset` (except
+  `btst #n,(xxx).W/.L`, native as of O-mem-1), `tas`, and the
   `ccr` / `sr` / `usp` operand forms — all `cfunc_` in increment 1.
 
 ### Hard `cfunc_` boundaries (never native in increment 1, by category)
@@ -187,3 +190,4 @@ This document is updated when the native set changes (each coverage-widening inc
 | Opcode | Boundary | Native emission |
 |---|---|---|
 | `moveq #imm,Dn` | M | CASE 0 native (register/flag write + prefetch-pipe advance); timing tail `cfunc_`'d to the interpreter via the hybrid handoff. |
+| `btst #n,(xxx).W` / `.L` | O-mem-1 | Full native via `generate_bus_step()` — 4-read (.W) / 5-read (.L) interruptible-read sequence with per-bus-cycle charge, suspend checkpoint, and address-error branch; resume after a mid-instruction yield owned by the interpreter's partial handler (ADR 0007 OQ-1). |
