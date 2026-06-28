@@ -348,17 +348,16 @@ void m68000_device::generate_bus_step(drcuml_block &block, const struct drc_bus_
 		// (m_aob&1 ? low byte : high byte) -- matches the interpreter's lane mask
 		// 0x00ff/0xff00 + the ">>8 when even" select.
 		uml::code_label const lbl_odd = m_drc_labelnum++;
-		uml::code_label const lbl_lane_done = m_drc_labelnum++;
 		UML_TEST(block, I1, 1);                                     // m_aob & 1 ?
 		UML_JMPc(block, COND_NZ, lbl_odd);                          // odd -> low byte already in place
 			UML_SHR(block, I0, I0, 8);                              // even -> high byte to low
 		UML_LABEL(block, lbl_odd);
 		UML_AND(block, I0, I0, 0xff);                               // keep the selected byte
-		UML_LABEL(block, lbl_lane_done);
 	}
 
-	// commit the read into m_edb (the interpreter stores read result in m_edb)
-	UML_STORE(block, &m_edb, 0, I0, SIZE_DWORD, SCALE_x1);          // m_edb = read
+	// commit the read into m_edb (the interpreter stores read result in m_edb).
+	// m_edb is u16 -> SIZE_WORD (a DWORD store would clobber the adjacent m_irc).
+	UML_STORE(block, &m_edb, 0, I0, SIZE_WORD, SCALE_x1);           // m_edb = read
 
 	// m_icount -= charge
 	UML_LOAD(block, I3, &m_icount, 0, SIZE_DWORD, SCALE_x1);        // i3 = m_icount
