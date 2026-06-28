@@ -329,14 +329,16 @@ PR, but `./mame -validate` and the interpreter leg must remain green.)
     bus-step descriptor → redo-flag cfunc → `generate_bus_step()` emitter → wire btst-absolute →
     coverage assertion + Linux `oracle` gate). ADR 0007's 5 open questions are resolved/locked.
     **Ready for Builder.**
-  - **O-mem-2:** `btst`/`bchg`/`bclr`/`bset` with `(An)`/`(An)+`/`-(An)` (adds the write checkpoint /
-    RMW path). **DESIGNED** in the [ADR 0007 O-mem-2 addendum](../adr/0007-m68000-native-memory-ea-suspend-mechanism.md#addendum--resolution-2026-06-28--o-mem-2-write-side-mechanism)
-    (write-side `generate_bus_step()` via `UML_WRITEM`, auto-inc/dec EA arithmetic incl. the A7-byte-by-2
-    rule, OQ-6 resolved). **Three owner decisions are flagged before the Planner runs (OQ-7…OQ-9):**
-    a mandatory fully-granted Leg-B oracle pass (the 1-cycle stepping never reaches the native write —
-    it would otherwise ship unvalidated; this also closes an O-mem-1 native-tail coverage gap),
-    `#imm8`-only vs `#imm8`+`Dn` batch scope, and folding in the `set_current_mmu → m_cache_dirty`
-    safeguard.
+  - **O-mem-2:** `btst`/`bchg`/`bclr`/`bset` with `(An)`/`(An)+`/`-(An)`, **both `#imm8` and `Dn`
+    source (24 forms)** — adds the write checkpoint / RMW path. **FULLY DESIGNED & OWNER-DECIDED** in
+    the [ADR 0007 O-mem-2 addendum](../adr/0007-m68000-native-memory-ea-suspend-mechanism.md#addendum--resolution-2026-06-28--o-mem-2-write-side-mechanism)
+    (write-side `generate_bus_step()` via `UML_WRITEM`; auto-inc/dec EA arithmetic incl. the A7-byte-by-2
+    rule; `Dn`/`#imm8` source forms; OQ-6…OQ-9 all resolved). **Ready for Planner — no open questions.**
+    Key decided items the plan must encode: **Task 0a** — a mandatory fully-granted Leg-B oracle pass
+    (grant `length` then drain at 1; the 1-cycle pass never reaches the native write, and this also
+    retroactively gates O-mem-1's native tail — divergences there are in-scope); **Task 0** — the
+    `AS_OPCODES` differential-oracle config; and the `set_current_mmu`/`enable_mmu → m_cache_dirty`
+    safeguard + regen test.
   - **O-mem-3:** memory-EA `MOVE`/`MOVEA` (`.b`/`.w`/`.l`) — the broadest coverage jump.
   - **O-mem-4:** memory-EA `ALU` (`add`/`sub`/`and`/`or`/`eor`/`cmp` + immediate forms).
   - **O-mem-5+:** `(d16,PC)` source, `addq`/`subq`/`Scc`/`clr`/`tst`/`neg`/`not` memory-EA forms.
