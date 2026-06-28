@@ -1,10 +1,13 @@
 # ADR 0007 — m68000 DRC native memory-EA + suspend / cycle / address-error mechanism
 
-> **Status:** Accepted, **amended 2026-06-28** by the
-> [Addendum / Resolution](#addendum--resolution-2026-06-28--o-mem-1-pre-merge-review) at the
-> foot of this file (a pre-merge review of O-mem-1 found §1's address-space claim inaccurate and
-> §5's `cfunc_` boundary unenforced; the addendum corrects §1, makes §5 an enforceable compile-time
-> gate, and is the controlling text where it conflicts with §1/§5 below). Original: Accepted (all 5
+> **Status:** Accepted, **amended 2026-06-28** by **two** addenda at the foot of this file:
+> (1) the [O-mem-1 pre-merge review](#addendum--resolution-2026-06-28--o-mem-1-pre-merge-review)
+> (corrects §1's address-space claim, makes §5 an enforceable compile-time gate); and
+> (2) the [O-mem-2 write-side mechanism](#addendum--resolution-2026-06-28--o-mem-2-write-side-mechanism)
+> (designs the RMW write step + auto-inc/dec EA arithmetic + `Dn`/`#imm8` source forms, adds the
+> fully-granted Leg-B oracle pass, resolves OQ-6…OQ-9, confirms gate continuity, and corrects the MMU
+> rationale — **all O-mem-2 questions owner-decided 2026-06-28; the Planner has a fully-decided spec**).
+> Each addendum is the controlling text where it conflicts with the body. Original: Accepted (all 5
 > open questions resolved by the owner; O-mem-1 planned —
 > see [`plan/phase-2-o-mem-1-btst-absolute.md`](../plan/phase-2-o-mem-1-btst-absolute.md)) ·
 > **Phase:** P2 · **Owner:** the boundary-M owner (committed to building it)
@@ -774,3 +777,459 @@ recorded:
   condition — needs a clean queryable signal), (b) route the read through a `read_interruptible` cfunc on
   the affected opcodes only, or (c) add a true interruptible-read UML path. Requires the deferring-tap
   oracle config to validate whichever is chosen. *Owner decision deferred to O-mem-2.*
+  **→ Resolved (keep simplification under the gate) in the
+  [O-mem-2 Addendum](#addendum--resolution-2026-06-28--o-mem-2-write-side-mechanism) below; the write side
+  shares the identical flag mechanism, so the resolution covers reads and writes uniformly.**
+
+---
+
+## Addendum / Resolution (2026-06-28) — O-mem-2 write-side mechanism
+
+> **Status:** Accepted. Extends (does not alter) the mechanism, the increment plan (§6), the
+> compile-time space-topology gate, and OQ-1…OQ-5. It designs the **write side** of
+> `generate_bus_step()` for the read-modify-write bit opcodes (`bchg`/`bclr`/`bset`), the
+> **auto-increment/decrement EA arithmetic** that O-mem-3/4/5 reuse, **resolves OQ-6**, confirms
+> **gate continuity**, and corrects a now-known-inaccurate MMU rationale (the §5 addendum's
+> "plain M68000 has no MMU" claim). It is the controlling design for the **O-mem-2** batch
+> ([§6](#6-increment-strategy-how-planner-should-batch-it) row 2). Written by the Architect from a
+> line-by-line read of the as-built read emitter (`m68000drc.cpp`) and the interpreter handlers
+> (`m68000-sdf.cpp` / `m68000-sdp.cpp`). **One decision (W4 — the oracle-coverage gap) needs owner
+> sign-off before the Planner runs; see the flag at the end.**
+
+### Scope of O-mem-2 (pin it before the Planner expands it)
+
+The target opcodes — verified against the device's own `_df` handler table — are the bit opcodes with
+the three register-indirect data EAs:
+
+| Opcode family | `(An)` / `(An)+` / `-(An)` handlers (`m68000-sdf.cpp`) | Access shape |
+|---|---|---|
+| `btst #n,<ea>` | `btst_imm8_ais_df` :19582 · `_aips_df` :19668 · `_pais_df` :19759 | **read-only** (3 reads) |
+| `btst Dn,<ea>` | `btst_dd_ais_df` :5654 · `_aips_df` :5717 · `_pais_df` :5785 | **read-only** (2 reads — no imm fetch) |
+| `bchg #n,<ea>` | `bchg_imm8_ais_df` :20703 · `_aips_df` :20804 · `_pais_df` :20910 | **RMW** (3 reads + 1 write) |
+| `bclr #n,<ea>` | `bclr_imm8_ais_df` :21681 · `_aips_df` :21786 · `_pais_df` :21896 | **RMW** (3 reads + 1 write) |
+| `bset #n,<ea>` | `bset_imm8_ais_df` :22679 · `_aips_df` :22780 · `_pais_df` :22886 | **RMW** (3 reads + 1 write) |
+| `bchg/bclr/bset Dn,<ea>` | `*_dd_ais/aips/pais_df` (6770/6848/6931, 7658/7740/7827, 8598/8676/8759) | **RMW** (2 reads + 1 write) |
+
+**Scope (OQ-8 — owner-decided 2026-06-28: BOTH source forms in one batch).** O-mem-2 lands the
+`#imm8`-source **and** `Dn`-source forms of all four bit-ops across the three EAs — **24 forms**
+(`btst`×6 read-only, `bchg`/`bclr`/`bset`×18 RMW). The two source forms share the identical write step,
+EA arithmetic, and Z/bit-modify computation; they differ only in the bit-number source and one prefetch
+read (full design in **W3b**). The per-opcode step lists are single-sourced from the generator, so the
+extra forms are descriptor rows + dispatch arms, not new mechanism.
+
+### W1. Write-side `generate_bus_step()` — symmetric to the read step
+
+The interpreter's write microcode step (the `bcsm2` state in every RMW handler, e.g.
+`bchg_imm8_ais_df` `m68000-sdf.cpp:20778-20801`, partial-handler `case 7` at `m68000-sdp.cpp:20646-20656`) is:
+
+```cpp
+// (pre-write architectural setup — emitted by the OPCODE emitter, not the bus primitive)
+m_aob = m_at;                 // restore the data EA saved during the read setup
+m_ird = m_ir;  if(m_next_state != S_TRACE) m_next_state = m_int_next_state;
+set_8xl(m_dbout, m_aluo);     // m_dbout = the MODIFIED byte, replicated into BOTH lanes
+alu_and8(m_alub, 1 << (m_dcr & 7)); sr_z();   // Z from the ORIGINAL byte (m_alub), set BEFORE the write
+m_base_ssw = SSW_DATA;        // NB: SSW_DATA only — the R bit is CLEAR (it is a write)
+// (the bus step itself — this is what the WRITE generate_bus_step emits)
+m_program.write_interruptible(m_aob & ~1, m_dbout, (m_aob & 1) ? 0x00ff : 0xff00);
+m_icount -= 4;
+if(m_icount <= 0) {                                  // identical two-way suspend checkpoint
+    if(access_to_be_redone()) { m_icount += 4; m_inst_substate = 7; }  // redo (refund + replay)
+    else                      { m_inst_substate = 8; }                 // completed
+    return;
+}
+// NO address-error branch after the write
+set_ftu_const(); m_inst_state = ...;                 // retire (interpreter `case 8`)
+```
+
+**The write is the same flag-not-longjmp shape as the read** (the load-bearing fact §"interruptible
+read is a flag" established for reads). `write_interruptible(addr, data, mask)` (`emumem.h:1813`)
+returns `void`, and the interpreter applies the *identical* `m_icount -= N; if(<=0){
+access_to_be_redone() ? redo : completed; return; }` checkpoint after it — querying the *same*
+`cpu_device::m_access_to_be_redone` flag. So a native UML write sequence can issue the write and then
+emit the same checkpoint; there is nothing non-local to model. **No new suspend machinery — the
+write reuses the read step's checkpoint verbatim.**
+
+**Design — extend the one primitive, do not fork it (OQ-4 inline-first preserved).** Switch the
+existing `generate_bus_step()` on the descriptor's `step.kind` (the generated enum already reserves
+`DRC_BUS_DATA_WRITE = 2`, `m68000-drcdesc.ipp`). The charge + two-way suspend checkpoint (the
+shared core, `m68000drc.cpp:394-417`) is emitted unchanged for all kinds; only the *access emission*
+and the *fault branch* differ by kind:
+
+| Step element | READ (`PREFETCH_READ`/`DATA_READ`) — as built | WRITE (`DATA_WRITE`) — O-mem-2 adds |
+|---|---|---|
+| address | `I2 = m_aob & ~1` | `I2 = m_aob & ~1` (same) |
+| lane mask | post-read shift/mask select (`byte_lane`) | `mask = (m_aob & 1) ? 0x00ff : 0xff00` → operand of `UML_WRITEM` |
+| value | result committed to `m_edb` | `UML_LOAD m_dbout` (caller already did `set_8xl`) |
+| access op | `UML_READ(I0, I2, SIZE_WORD, SPACE_PROGRAM)` | `UML_WRITEM(I2, m_dbout, mask, SIZE_WORD, SPACE_PROGRAM)` |
+| charge `−N` | shared | shared |
+| suspend checkpoint | shared (redo/completed substates from descriptor) | shared (identical) |
+| address-error branch | present iff `has_addr_error` | **absent** (`has_addr_error == 0` always) |
+
+- **The UML primitive is `UML_WRITEM`** (`drcumlsh.h:67` —
+  `UML_WRITEM(block, addr, src, mask, size, space)`), a word-sized masked write at the even address
+  `m_aob & ~1` with mask `0x00ff`/`0xff00`. This is the exact mirror of the interpreter's
+  `write_interruptible(addr, data, mask)` — a masked word write updates only the selected byte lane,
+  so on flat RAM (the gate) it is byte-for-byte equal. **Do not** decompose to a `SIZE_BYTE`
+  `UML_WRITE` at the computed byte address: that presents a different bus access shape than the
+  interpreter's word-masked write and would diverge on any tapped word handler.
+- **Value placement is the *caller's* job.** `set_8xl(m_dbout, m_aluo) = (m_aluo & 0x00ff) |
+  (m_aluo << 8)` (`m68000.h:349`) replicates the modified byte into both lanes; the lane mask in
+  `UML_WRITEM` selects which lane actually lands. The opcode emitter computes the modified byte and
+  stores the replicated value into `m_dbout` (a `u16`, SIZE_WORD) *before* calling the write
+  `generate_bus_step()` (mirroring `bcsm2`'s ordering: `set_8xl` precedes the write).
+- **No address-error branch after the write.** The data write reuses the address already validated by
+  the data *read* at the same EA (`m_aob = m_at`); for a byte access even/odd are both legal, so the
+  interpreter has *no* `m_aob & 1 → S_ADDRESS_ERROR` after the write. `DATA_WRITE` rows therefore
+  carry `has_addr_error = 0` and the primitive emits no fault branch — the write step is *simpler*
+  than a prefetch read.
+- **`m_aluo`/`m_alub` are scratch, not live across the yield.** The native emitter computes the
+  modified byte directly in UML and stores `m_dbout`; it need not write `m_aluo`. On a
+  completed-substate-8 yield the interpreter's `case 8` only retires (uses neither). On a
+  redo-substate-7 yield the interpreter's `case 7` re-issues the write from `m_dbout` (not `m_aluo`).
+  Both are satisfied by leaving `m_dbout` (and `m_sr`'s Z) correct before the write.
+
+**The one asymmetry to record:** the write's *redo* arm (substate 7), if it ever fired, would have
+the native path write once, refund, yield, and the interpreter re-write on resume — a double write of
+the *same* value to the *same* cell (idempotent). It fires **only** on a deferring-tap bus, which the
+space-topology gate excludes; under the gate the redo arm is **dormant-but-correct**, exactly as the
+read's redo arm (OQ-6 below). The *completed* arm (substate 8 — `m_icount` hit 0 exactly at the
+write) **is** reachable on flat RAM and **is** correct: the native `UML_WRITEM` leaves memory as
+`write_interruptible` would, and `case 8` retires.
+
+### W2. Auto-increment / decrement EA arithmetic (the layer O-mem-3/4/5 reuse)
+
+Address-register-indirect EA computation is **opcode-emitter setup** (emitted before the data
+`generate_bus_step`), not part of the bus primitive — the same separation O-mem-1 used for the
+absolute-address setup. The register index is `ry = map_sp((m_irdi & 7) | 8)` where
+`map_sp(r) = (r == 15 ? m_sp : r)` (`m68000.h:352`) and `m_sp ∈ {15,16}` is the active-A7 bank index
+(`m68000.h:194`). Verified from the handlers:
+
+- **`(An)` (`ais`, e.g. `:19610`):** `m_aob = m_da[ry]; m_at = m_da[ry];` — no register update. Native:
+  load `m_da[ry]` into `m_aob` and `m_at`.
+- **`(An)+` (`aips`, e.g. `:19696-19704`):** read at the *old* address, then post-increment:
+  `m_aob = m_da[ry]; m_at = m_da[ry]; m_au = m_da[ry] + (ry < 15 ? 1 : 2); … ; m_da[ry] = m_au;` — the
+  write-back to `m_da[ry]` happens *after* the address is latched (and, for RMW, after the read).
+- **`-(An)` (`pais`, e.g. `:19790-19797`):** pre-decrement, read at the *new* address:
+  `m_au = m_da[ry] - (ry < 15 ? 1 : 2); m_aob = m_au; m_at = m_au; m_da[ry] = m_au;` — **plus an internal
+  `m_icount -= 2`** at the `pdcw1` micro-step (`:19793`) with **no** suspend checkpoint (it is not a bus
+  access), emitted as a bare charge before the data read's `generate_bus_step`.
+- **The A7 byte special case is `(ry < 15 ? 1 : 2)`** — a byte access to `(A7)+` / `-(A7)` adjusts the
+  stack pointer by **2**, not 1, to keep it word-aligned. `ry < 15` is true for `A0–A6` (indices 8–14)
+  and false for either A7 bank (`m_sp` = 15 or 16). Bit ops are **always byte**, so the delta is `1`
+  except `2` for A7. The native emitter computes `ry` from the opword (`(m_ird & 7)`; if `== 7`, load
+  `m_sp`; else `+8`) and selects the delta accordingly — an architectural register-index computation,
+  **orthogonal to the space gate** (it touches `m_sp`/`m_da[]`, never a space selector).
+
+> **Generalization note for O-mem-3/4/5 (record, do not implement here):** for word/long operands the
+> delta becomes `2`/`4` with **no** A7 exception (only *byte* has the A7-by-2 rule). The `(An)+`/`-(An)`
+> setup emitters O-mem-2 writes should take the operand size so MOVE/ALU reuse them; O-mem-2 only
+> instantiates the byte case. Keep the predecrement internal `−2` single-sourced from the descriptor
+> (see W5), not hand-typed.
+
+### W3. RMW composition — where the bit is modified vs. where Z is set
+
+The RMW sequence composes as **read-EA-prefetch(s) → data-read → compute → data-write → retire**.
+The bit modification and the Z flag are set at **different** points, and getting the order wrong is the
+highest-risk bug in the batch (analogous to O-mem-1's R-A):
+
+1. **Data read** (`adrw2` / `pinw2` / `pdcw2`): the original byte arrives in `m_edb`, committed to
+   `m_dbin`. `DATA_READ`, `byte_lane = 1`, `has_addr_error = 0`.
+2. **Compute** (`bcsm1` for `bchg`; `bclm1`+`bclm2` for `bclr`; the `bset` analogue): in the *same*
+   microcode state as the **refill prefetch read**, the interpreter saves the original byte
+   (`m_alub = m_dbin`) and computes the modified byte into `m_aluo` via the per-opcode ALU op —
+   **`bchg`: `alu_eor8` (toggle); `bclr`: `alu_or8` then `alu_eor8` (= AND-NOT); `bset`: `alu_or8`
+   (set)** (verified: `bchg` :20759, `bclr` :21736+:21741). The bus step here is a *prefetch read*
+   (`DATA`-independent), so the compute is pre-read architectural setup.
+3. **Write step** (`bcsm2`): `set_8xl(m_dbout, modified)` then `alu_and8(m_alub, 1<<(m_dcr&7)); sr_z()`
+   — **Z is computed from the ORIGINAL byte (the tested bit's prior value) and set BEFORE the write**,
+   then the modified byte is written. This is correct 68000 semantics: Z reflects the bit *as tested*;
+   memory receives the *post-op* value.
+
+So the **only per-opcode difference across `bchg`/`bclr`/`bset` is the step-2 ALU op**; the bus-step
+descriptor (kinds, charges, substates, addr-error flags, byte-lanes) is **identical** for all three at
+a given EA. The native emitter therefore shares all setup/commit/write emission and varies only the
+bit-modify UML (`UML_XOR` / `UML_OR` / `UML_OR`+`UML_XOR` against `1 << (m_dcr & 7)`), with Z derived
+from `original & (1 << (m_dcr & 7))` exactly as O-mem-1's `compute_z` does (`m68000drc.cpp:534-548`),
+but reading the original byte from `m_dbin` rather than recomputing.
+
+### W3b. `Dn`-source forms (`btst/bchg/bclr/bset Dn,<ea>`) — same write step + EA, one fewer prefetch
+
+Per OQ-8 (owner: include both source forms), O-mem-2 also emits the **register-source** forms. Verified
+against `btst_dd_ais_df` (`:5654`, read-only) and `bchg_dd_ais_df` (`:6770`, RMW): the `Dn`-source
+forms **share the identical write step (W1), EA arithmetic (W2), and Z/bit-modify computation (W3)** as
+the `#imm8` forms — the only architectural differences are:
+
+1. **No immediate-extension fetch.** The `#imm8` forms open with the `o#w1` prefetch that reads the
+   bit-number extension word (substates 1/2); the `Dn` forms have **no** such read — the bit number is
+   `m_dcr = m_da[rx]` (`rx = (m_irdi >> 9) & 7`), a register read, set in the EA-setup with no bus
+   cycle. So the `Dn` forms have **one fewer prefetch read**, and the whole substate ladder shifts down
+   by 2.
+2. **Resulting bus-step runs (single-sourced from the generator; verified substates):**
+
+   | Source · EA | bus cycles | substate ladder (kind) |
+   |---|---|---|
+   | `#imm8 (An)/(An)+` RMW | 4 | ext-read 1/2 · data-read 3/4 · refill 5/6 · **write 7/8** |
+   | `#imm8 -(An)` RMW | 4 (+ internal −2) | ext-read 1/2 · data-read 3/4 (after `−2`) · refill 5/6 · **write 7/8** |
+   | `Dn (An)/(An)+` RMW | 3 | data-read 1/2 · refill 3/4 · **write 5/6** |
+   | `Dn -(An)` RMW | 3 (+ internal −2) | data-read 1/2 (after `−2`) · refill 3/4 · **write 5/6** |
+   | `#imm8 <ea>` `btst` | 3 | ext-read 1/2 · data-read 3/4 · final-prefetch 5/6 (read-only, no write) |
+   | `Dn <ea>` `btst` | 2 | data-read 1/2 · final-prefetch 3/4 (read-only, no write) |
+
+   (The `(An)+`/`-(An)` rows carry the W2 auto-inc/dec EA setup and, for `-(An)`, the internal `−2`.)
+
+**Implications for the Planner / generator (small, all additive):**
+
+- **Dispatch arms:** the `Dn` forms are a *different opcode family* — encodings `0x01xx` mask `0xf1f8`
+  (`btst_dd_ais` `0x0110`, `bchg` `0x0150`, `bclr` `0x0190`, `bset` `0x01d0`, +`0x08`/`0x10` for
+  `(An)+`/`-(An)`), vs the `#imm8` `0x08xx` mask `0xfff8`. Each is its own `if (drc_native_mem_ea_allowed())`
+  arm in `generate_native_dispatch`, but they call the *same* emitter helpers (EA setup, write
+  `generate_bus_step`, `compute_z`, bit-modify) — only the bit-number source (`m_da[rx]` vs `m_dt`) and
+  the step run differ.
+- **Generator/descriptor:** no new step *kinds* — the `Dn` runs are just shorter `drc_bus_run` entries
+  with renumbered substates, emitted by the same microcode walk (OQ-2). No new descriptor fields beyond
+  what `#imm8` + the `DATA_WRITE` kind already introduce.
+- **Net opcode count** O-mem-2 makes native: 4 bit-ops × 3 EAs × 2 source forms = **24 forms**
+  (`btst`×6 read-only, `bchg`/`bclr`/`bset`×18 RMW). All share W1/W2/W3.
+
+### W4. ⚠ Oracle coverage of the native write step — the load-bearing gate decision
+
+**Finding (verified, applies to O-mem-1 too): under the oracle's stepping regime the native multi-step
+path runs only its FIRST bus step; every later step — including the write — is executed by the
+interpreter, so the native write would ship UNVALIDATED by Leg B as the harness stands.**
+
+The Leg-B driver grants **exactly one cycle at a time**: `oracle_m68000_device::step_instruction`
+ignores its `budget` and loops `*m_icountptr = 1; run();` until `m_ipc` changes
+(`cpu_test_harness.cpp:374-453`), and **both** legs use it (`cpuoracle.cpp:1102,1138-1178`). With a
+1-cycle grant the native path's first `generate_bus_step` charges `−4`, finds `m_icount ≤ 0`, and
+yields at a non-zero substate; the boundary-M entry guard (`m_inst_substate == 0`,
+`m68000drc.cpp:162-164`) then routes **every subsequent grant to the interpreter delegate**. To run a
+4-bus-cycle RMW fully native the core needs `m_icount > 16` at instruction start; the oracle gives
+`1`. Consequences:
+
+- **O-mem-1 (already merged):** only native *read-1* of `btst`-absolute + the substate-2 yield is
+  Leg-B-exercised; reads 2–5, the byte-lane data read, `compute_z`, and `retire` run on the
+  interpreter in *both* legs (so they agree trivially). The native tail is exercised only by the
+  throughput benchmark (Task 7, real driver, large quanta) and the spot-integration smoke (Task 9),
+  **not** by the cycle/RAM/state-exact correctness gate. The ADR's "a native `btst`-absolute that
+  miscounts a single bus cycle … fails Leg B immediately" is true **only for bus step 1** under the
+  current harness.
+- **O-mem-2 (the write batch):** the write is bus step **4** (substate 7/8), reached only after three
+  prior steps that each yield under 1-cycle stepping. **The native write step is unreachable under
+  Leg B as built** — O-mem-2's headline mechanism would merge with zero correctness-gate coverage.
+  That is exactly the "oracle-blind gap" the O-mem-1 pre-merge review exists to prevent.
+
+**Decision (RESOLVED — owner-approved: add the fully-granted Leg-B pass, "Task 0a"). This is a
+gate-methodology change, designed concretely here.**
+
+#### Task 0a — the fully-granted Leg-B pass (concrete design)
+
+Add a **second DRC stepping mode** to the oracle stepper (`oracle_m68000_device::step_instruction`,
+`cpu_test_harness.cpp:374-453`), selected per the existing backend-toggle convention (e.g. an
+env flag `CPUORACLE_M68_DRC_FULLGRANT=1`, alongside `CPUORACLE_M68_DRC_C`). It changes **only** the
+cycle-grant sizing of the existing single-step loop — not the comparison, the snapshot, or the
+retirement detection:
+
+- **Grant `length` on the first iteration, then drain at 1 cycle.** The current loop hard-codes
+  `*m_icountptr = 1` every iteration. The full-grant mode sets `*m_icountptr = length` on the **first**
+  iteration (`length` = the corpus `expected_cycles`, already in hand at `cpuoracle.cpp:1065`) and
+  `1` thereafter; the cycle accumulation becomes `consumed += before − *m_icountptr` (currently
+  `1 − *m_icountptr`, valid only for a unit grant). Everything else — `snapshot_retired()` each
+  iteration while `m_inst_state != S_TRACE`, the `m_ipc != entry_ipc` break, the `frozen_consumed`
+  trace latch — is **unchanged**.
+- **Why this runs the whole native instruction including the WRITE.** With `m_inst_substate == 0`
+  (fresh case) the boundary-M entry guard admits the native block (`m68000drc.cpp:162-187`); with
+  `m_icount == length`, every `generate_bus_step` charges `−4` and finds `m_icount > 0` **until the
+  last bus access**, so the native path runs read-EA → data-read → compute → **data-write** in one
+  pass. After the final access's `−4`, `m_icount == length − length == 0`, the suspend checkpoint
+  fires (`≤ 0`), the *completed* substate is stored, and the block yields — exactly as the interpreter
+  leg does at the same point. The (bus-free) **retire** then runs under the interpreter in the 1-cycle
+  drain, where the existing snapshot-before-the-retiring-grant logic captures instruction-1's retired
+  state and the `m_ipc` change is detected.
+- **Why NOT `length + headroom` in a single grant (correcting the first-pass note in W4's owner
+  brief).** Granting `> length` makes the final access find `m_icount > 0`, so the native **retire**
+  runs — but the block then JMPs to `lbl_delegate → cfunc_interpret_quantum` and the interpreter
+  immediately runs the **next** instruction's first prefetch on the remaining cycles, advancing
+  `m_ipc` and overwriting `m_pc`/`m_au`/`m_irc`/`m_ird` *before* `run()` returns. The harness cannot
+  then snapshot instruction-1's retired state (the 1-cycle loop exists precisely to stop between retire
+  and the next prefetch). `length` is therefore the exact sweet spot: **all native bus accesses run,
+  no overshoot.**
+- **SR.T deferred-trace: handled for free.** Because the native phase stops at `m_icount == 0`
+  *before* retire, it never reaches the post-retire `m_next_state = S_TRACE` set or the trace dispatch;
+  the retire+trace run in the 1-cycle drain under the unchanged `m_inst_state == S_TRACE` snapshot-
+  freeze logic (`:424-430`). So `SR.T` cases need **no special handling** in the full-grant mode — a
+  direct consequence of granting exactly `length` rather than overshooting (the overshoot variant is
+  precisely what *would* have broken `SR.T` handling).
+
+**Coverage this adds, and the one residual.** The full-grant pass exercises, natively and under the
+correctness gate, every native bus access of a multi-step opcode — the headline being O-mem-2's
+**data write** (its RAM byte, the SR.Z it sets, and the per-bus-cycle charge), validated because the
+write's effects propagate into the retired-state comparison (the retire being interpreter-run in
+*both* legs cannot mask a native-write divergence). **Residual:** the native **retire** lambda itself
+(the `m_inst_state` dispatch + trace-arm in `generate_btst_imm8_absolute`'s `retire()`, and its
+O-mem-2 analogue) is the *only* native code still not oracle-exercised — it runs in production when a
+real driver grants `> length`, but the snapshot model cannot reach it without the overshoot above.
+This residual is low-risk (it mirrors the already-validated boundary-M `moveq` handoff tail and routes
+`set_ftu_const` through a cfunc) and is logged as a bounded known limitation, not a blocker. (A future
+overshoot-tolerant snapshot — capturing retired state via an instrumentation hook the instant
+`m_inst_substate` returns to 0 — could close it; out of scope for O-mem-2.)
+
+- **Retroactive scope (in-scope to fix here):** Task 0a runs against the **existing native
+  `btst`-absolute** too, so it **becomes the first correctness-gate coverage of O-mem-1's native tail**
+  (reads 2-5, the byte-lane data read, `compute_z`) — to date validated only by the throughput
+  benchmark and code review. **Any divergence Task 0a surfaces in `btst`-absolute is in-scope for the
+  O-mem-2 PR to fix** (same mechanism family). The Planner should run Task 0a **first**, before adding
+  any write opcode, to confirm the read tail is clean on the new pass — a clean baseline makes a
+  later write-path failure unambiguous.
+- **"Green" definition.** The full-grant pass is green when, over the full corpus on **x64
+  (`drcbex64`)** and **C (`drcbec`)**, the DRC leg and interpreter leg are **register/flag/RAM/cycle
+  identical** — the same equality the standard Leg B asserts (`cpuoracle.cpp:1198-1226`), under the
+  `length`-grant regime.
+- **Supplements, does not replace, the one-cycle pass.** Both run. The one-cycle pass stays primary:
+  it validates native **step 1 + the suspend/redo handoff** and the `SR.T` snapshot path at microcycle
+  granularity (which the full-grant pass coarsens). The full-grant pass adds the native **multi-step +
+  write** coverage the one-cycle pass structurally cannot reach. A batch merges only when **both** are
+  green (on x64 and C, Leg A unchanged).
+
+### OQ-6 — interruptible / wait-state native reads **and writes** → RESOLVED: keep the gated simplification
+
+**Decision: O-mem-2 keeps the non-interruptible `UML_READ` / `UML_WRITEM` simplification under the
+existing `drc_native_mem_ea_allowed()` gate; it does NOT add a native interruptible path.** Rationale,
+now confirmed for the write side:
+
+- `write_interruptible` shares the **identical** `m_access_to_be_redone` flag mechanism as
+  `read_interruptible` (the interpreter applies the same `access_to_be_redone()` checkpoint after both).
+  On flat RAM/ROM — the only bus class the gate permits and the oracle runs — **neither** ever defers,
+  charges a wait-state, or sets the flag, so `UML_WRITEM ≡ write_interruptible` exactly (same RAM
+  effect, same cycles), and the write's redo arm is **dormant-but-correct** just like the read's.
+- O-mem-2's opcodes touch only `m_program` (data read/write) and `m_opcodes` (prefetch); under the
+  gate all resolve to `SPACE_PROGRAM` (W6). The only deferring taps in a plain `M68000` are the
+  VPA/autovector taps on `AS_CPU_SPACE` (`m68000.cpp` `default_autovectors_map`), which these
+  reads/writes never touch. No in-scope plain-`M68000` DRC driver taps the program/data path.
+
+So OQ-6's *substance* is unchanged by the write side; it stays **DEFERRED** (option implicitly (a):
+gated-by-absence), with the closure requirement intact: **before** DRC-native memory-EA is enabled on
+any driver that taps the program/data path, the oracle must gain a **deferring-tap corpus config** (a
+`before_time`/`defer_access` tap on the data address) to drive the redo/wait machinery — now for both
+the read *and* the write redo arms. That deferring-tap config is **distinct** from W4's fully-granted
+pass (W4 reaches the native steps; the deferring-tap config exercises the redo arm) and remains
+deferred; recommend building it only when a tapping driver is actually targeted. **OQ-6 status:
+DEFERRED, re-confirmed for writes; resolution = keep simplification under the gate.**
+
+### Gate continuity — the existing predicate covers O-mem-2 unchanged
+
+Confirmed against the handlers: every O-mem-2 access goes through `m_opcodes.read_interruptible`
+(prefetch), `m_program.read_interruptible` (data read), or `m_program.write_interruptible` (data
+write) — e.g. `bchg_imm8_ais_df` :20713 / :20739 / :20787. Under `drc_native_mem_ea_allowed()`
+(`m68000.cpp:80-87`) all of `m_s_program == m_s_opcodes == m_s_uprogram == m_s_uopcodes` and
+`m_mmu == nullptr`, so `m_program` and `m_opcodes` are the *same* `address_space` and `SPACE_PROGRAM`
+is correct for prefetch, data read, **and data write** in both `SR_S` modes — **no new gate clause and
+no `SR_S` runtime branch**. Each new O-mem-2 dispatch arm is wrapped in
+`if (drc_native_mem_ea_allowed()) { … }` exactly as the `btst`-absolute arm
+(`m68000drc.cpp:249-259`); when false the arm is not emitted and dispatch falls to `cfunc_`.
+
+- **`AS_OPCODES`-native stays OUT of O-mem-2** (the deliberate, recorded later extension from the §5
+  addendum). O-mem-2 only adds the **`AS_OPCODES` differential-oracle config** that the §5 addendum
+  parked as "O-mem-2's opening task" — a config that builds a *separate* `AS_OPCODES` space (distinct
+  contents from `AS_PROGRAM`) and runs Leg B `-drc 0` vs `-drc 1`: with the gate in place the native
+  arm is not emitted there, proving the `cfunc_` fallback matches and the DRC does not mis-read the
+  opcode space. This is **O-mem-2 Task 0** (it validates the gate; it does not enable native
+  `AS_OPCODES`).
+
+### Correction to the §5 addendum — the MMU rationale was inaccurate (LOW finding from PR #28 review)
+
+The §5 addendum stated "`drc_supported_for_type()` already restricts DRC to the plain `M68000`, which
+has no MMU, so `m_mmu` is `nullptr` at emit time in every supported config." **Both halves are
+inaccurate** (verified live):
+
+1. `drc_supported_for_type()` (`m68000.cpp:74-78`) checks **only** `type() == M68000`; it does **not**
+   test `m_mmu`. The `m_mmu == nullptr` clause lives solely in `drc_native_mem_ea_allowed()`
+   (`m68000.cpp:83`).
+2. A **plain `M68000` can have an MMU attached** — Apple Lisa, Sun-1, and SGI pm2 attach a custom MMU
+   to a `type() == M68000` CPU via `set_current_mmu()` (`m68000.cpp:89-95`). So `m_mmu` is **not**
+   guaranteed `nullptr` for a DRC-eligible device.
+
+**Disposition:** the `m_mmu == nullptr` clause in `drc_native_mem_ea_allowed()` is therefore
+**load-bearing, not theoretical** — it actively excludes the Lisa/Sun-1/SGI class from native
+memory-EA. Correct the §5-addendum prose accordingly (this addendum is the controlling text).
+
+**Safeguard — IN SCOPE for O-mem-2 (OQ-9, owner-approved):** `set_current_mmu()` (and `enable_mmu()`,
+`:129-133`) currently mutate `m_mmu` **without** setting `m_cache_dirty`. The resident block is emitted
+once at the first `code_flush_cache()` after `device_start` (`m68000.cpp:318`); the gate is evaluated
+**then**. If an MMU is attached/enabled **after** that emit (some MMUs toggle at runtime via a control
+register), `drc_native_mem_ea_allowed()` will have already emitted the native arm against the pre-MMU
+topology, and native accesses would bypass translation → mis-execution. **O-mem-2 adds the fix:** set
+`m_cache_dirty = true` whenever `m_mmu` changes value in `set_current_mmu()` / `enable_mmu()`, so the
+resident block regenerates and the gate re-evaluates (cheap — a single resident block) — plus a unit
+test: attach an MMU after the block is emitted, assert the block regenerates and the native memory-EA
+arm is no longer emitted (and, symmetrically, that detaching re-enables it). This hardens the same gate
+O-mem-2 widens and discharges the safeguard the §5 addendum already called for. (Whether any current
+DRC-eligible plain-`M68000` driver attaches its MMU at *runtime* vs. machine-config time is **not** a
+gating question — the fix is correct either way; it is defense-in-depth if config-time-only and a
+correctness fix if runtime.)
+
+### Merge-gate guidance for O-mem-2 (what the Planner should encode)
+
+Each O-mem-2 PR merges only on **all** of:
+
+1. **Dual-leg flat-RAM oracle GREEN** (Leg A unchanged; Leg B register/flag/RAM/**cycle**-exact),
+   per batch, on **x64 (`drcbex64`)** and **C (`CPUORACLE_M68_DRC_C=1`)**; arm64 on the CI matrix.
+2. **The fully-granted Leg-B pass (W4) GREEN** — the *new* gate that actually exercises the native
+   data-write/retire. **Without this the native write is unvalidated; treat it as a blocking gate, not
+   a nice-to-have.**
+3. **The `AS_OPCODES` differential-oracle config (Task 0) GREEN** — proves the gate keeps `AS_OPCODES`
+   machines on `cfunc_` and the fallback matches.
+4. **Gate-predicate + coverage assertions updated** — `drc_native_mem_ea_allowed()` unit test still
+   green; the native-coverage assertion (`tests/emu/cpu/m68000_drc_coverage.cpp`, Task 6) extended so
+   each newly-native `bchg`/`bclr`/`bset`/`btst` `(An)/(An)+/-(An)` form (both `#imm8` and `Dn` source —
+   24 forms) asserts native-dispatched; **plus the MMU-regen test** (OQ-9: attach an MMU post-emit,
+   assert the native arm drops out and dispatch falls to `cfunc_`).
+5. **Generator additivity** — regenerating leaves the existing committed files byte-identical; only
+   `m68000-drcdesc.ipp` grows (the new `DATA_WRITE` rows + the `(An)/(An)+/-(An)` runs, including the
+   predecrement internal `−2`), single-sourced from the microcode walk (OQ-2).
+6. **Code review** (pre-merge reviewer) and the **Linux `oracle` CI job** green (Windows-green is
+   necessary-not-sufficient — boundary M passed Windows, failed Linux SysV twice).
+7. **Throughput bench re-run on a gate-eligible, flat-topology driver** where the RMW bit ops are hot
+   (not an FD1094/`AS_OPCODES` set — those run `cfunc_` and show no speedup, per the §5 addendum's
+   honest-number note).
+
+### W5 / descriptor delta (single-sourcing the write rows)
+
+`m68000gen.py`'s bus-step walk (Task 1 of O-mem-1) extends additively to emit, for the O-mem-2 family:
+the `DATA_WRITE` step (kind 2, `charge` = 4, the redo/completed substate pair, `has_addr_error = 0`,
+and a `byte_lane`-equivalent flag so the emitter applies the `0x00ff`/`0xff00` mask to `UML_WRITEM`),
+and the predecrement **internal `−2`** (model it as a per-step `pre_charge` field on the data-read step,
+or an `INTERNAL` step kind — Planner's choice, but it MUST come from the microcode walk, never
+hand-typed). The substate numbers are taken from the handler walk exactly as O-mem-1 did
+(`#imm8` `(An)`/`(An)+` RMW: reads at 1/2, 3/4, refill 5/6, **write 7/8**; `-(An)` identical substates
+with the internal `−2` folded before the data read; `Dn`-source forms shift down by one read).
+
+### Consequences delta (O-mem-2)
+
+- **Good:** the write side is a *small* extension of the proven read primitive (one `step.kind`
+  branch + `UML_WRITEM`), the EA-arithmetic layer is reusable by O-mem-3/4/5, and the gate/OQ-6/space
+  reasoning all carry over unchanged. `bchg`/`bclr`/`bset` differ only by one ALU op.
+- **Cost / honest notes:** (1) the native write is **not** reachable by the *current* oracle — Task 0a's
+  fully-granted pass is mandatory new scaffolding, and it exposes (and now closes) that O-mem-1's native
+  tail was likewise only benchmark-validated; (2) the native **retire** lambda remains the one native
+  residual the snapshot model cannot reach (W4); (3) the predecrement internal `−2` adds a non-bus
+  charge the descriptor must carry; (4) the MMU safeguard broadens O-mem-2's blast radius slightly (two
+  core mutators gain `m_cache_dirty = true`).
+
+### Open questions — all RESOLVED for O-mem-2 (owner-decided 2026-06-28)
+
+- **OQ-6 → RESOLVED:** keep the non-interruptible `UML_READ`/`UML_WRITEM` simplification under the
+  space-topology gate; the deferring-tap oracle config remains the *deferred* closure requirement, now
+  covering the read **and** write redo arms (built only when a tapping driver is targeted).
+- **OQ-7 → RESOLVED (yes):** add the fully-granted Leg-B pass as **Task 0a**, designed concretely in W4
+  (grant `length` then drain at 1; `SR.T` handled for free; supplements the one-cycle pass; runs against
+  the existing `btst`-absolute, whose native tail it retroactively gates — any divergence there is
+  in-scope to fix). **Blocking gate for every O-mem-2 PR.** Residual: native `retire` (bounded, logged).
+- **OQ-8 → RESOLVED (both source forms):** O-mem-2 covers `#imm8` **and** `Dn` source for all four
+  bit-ops × three EAs (24 forms; W3b). Same write step / EA arithmetic; the `Dn` forms are a separate
+  dispatch family with one fewer prefetch and a shifted substate ladder — additive to the generator.
+- **OQ-9 → RESOLVED (fold in):** O-mem-2 adds `m_cache_dirty = true` on `m_mmu` change in
+  `set_current_mmu()`/`enable_mmu()` + a regen unit test (see the MMU section).
+
+No open questions remain for O-mem-2; the Planner has a fully-decided spec. (The deferring-tap oracle
+config under OQ-6, and the native-`AS_OPCODES` space-selection path, stay deferred to later, separately
+scoped increments and are recorded as such.)
