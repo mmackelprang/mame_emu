@@ -103,7 +103,15 @@ void m68000_device::code_flush_cache()
 		// (begin_block, not begin_invariant_block).  reset() clears the
 		// transient area, so regenerating here is free; an invariant block would
 		// allocate from the small never-freed permanent area.
-		drcuml_block &block(m_drcuml->begin_block(64));
+		//
+		// maxinst must cover EVERY native opcode's UML emitted into this one
+		// resident block (begin_block allocates maxinst*9/4 instruction slots and
+		// drcuml_block_append throws emu_fatalerror "Overran maxinst" past that).
+		// boundary M's 64 sufficed for moveq alone (~50 ins); O-mem-1's native
+		// btst-absolute (.W 4-read + .L 5-read sequences) brings the block to
+		// ~530 instructions, and later O-mem batches add more -- size it with
+		// headroom so adding an opcode does not silently overrun the block.
+		drcuml_block &block(m_drcuml->begin_block(1024));
 		static_generate_entry_point(block);
 		block.end();
 	}
