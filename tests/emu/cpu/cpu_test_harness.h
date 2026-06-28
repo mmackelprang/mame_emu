@@ -122,6 +122,13 @@ public:
 	// m_isdrc, so Leg B can REQUIRE the DRC really engaged (anti-vacuity guard).
 	// Default false (cores without a DRC arm, or DRC off).
 	virtual bool oracle_is_drc() const { return false; }
+
+	// True iff the live device's space-topology gate (drc_native_mem_ea_allowed())
+	// permits native memory-EA emission.  Overridden by oracle_m68000_device.
+	virtual bool oracle_native_mem_ea_allowed() const { return false; }
+	// # of gated memory-EA dispatch arms emitted in the last resident-block build
+	// (0 => the btst-absolute arm was gated out).  Overridden by oracle_m68000_device.
+	virtual uint32_t oracle_native_arm_emit_count() const { return 0; }
 };
 
 // Describes one CPU core: how to register its driver and how to translate
@@ -189,6 +196,11 @@ public:
 	// and REQUIRE it did NOT on the interpreter harness).  Valid only while the
 	// machine is alive (inside run_with_machine's body).
 	bool drc_engaged() const;
+
+	// True iff the live device's space-topology gate permits native memory-EA emission.
+	bool native_mem_ea_allowed() const;
+	// # of gated memory-EA dispatch arms emitted in the last resident-block build.
+	uint32_t native_arm_emit_count() const;
 
 	// Reset the CPU to a clean, between-instructions boundary.
 	void reset_cpu();
@@ -292,6 +304,11 @@ const cpu_core_descriptor &m6502_core_descriptor();
 
 // Returns the descriptor for the m68000 oracle core.
 const cpu_core_descriptor &m68000_core_descriptor();
+
+// Returns descriptors for the three gate-false topology fixtures.
+const cpu_core_descriptor &m68000_asopcodes_core_descriptor();
+const cpu_core_descriptor &m68000_userspace_core_descriptor();
+const cpu_core_descriptor &m68000_mmu_core_descriptor();
 
 } // namespace cpuoracle
 
