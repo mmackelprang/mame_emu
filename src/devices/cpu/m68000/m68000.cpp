@@ -57,6 +57,7 @@ m68000_device::m68000_device(const machine_config &mconfig, device_type type, co
 	  m_drcoptions(0),
 	  m_cache_dirty(true),
 	  m_isdrc(false),
+	  m_drc_redo_scratch(0),
 	  m_drc_labelnum(1)
 {
 }
@@ -265,6 +266,21 @@ void m68000_device::func_interpret_quantum()
 void m68000_device::cfunc_interpret_quantum(void *param)
 {
 	static_cast<m68000_device *>(param)->func_interpret_quantum();
+}
+
+// The DRC suspend checkpoint queries the interpreter's EXACT access_to_be_redone()
+// read-and-clear semantics from a COLD path (taken only when m_icount<=0 at a bus
+// step -- never on the fully-granted hot path).  The flag is private to cpu_device
+// and the read clears it (std::exchange), so we cannot UML_LOAD it; this cfunc
+// calls the public accessor and parks the boolean in a DRC-owned scratch byte.
+void m68000_device::func_take_access_to_be_redone()
+{
+	m_drc_redo_scratch = access_to_be_redone() ? 1 : 0;
+}
+
+void m68000_device::cfunc_take_access_to_be_redone(void *param)
+{
+	static_cast<m68000_device *>(param)->func_take_access_to_be_redone();
 }
 
 // The DRC arm of execute_run().  The dispatch is a SINGLE RESIDENT BLOCK

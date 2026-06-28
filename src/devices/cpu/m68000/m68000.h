@@ -240,6 +240,7 @@ protected:
 	u32                        m_drcoptions;    // configurable DRC options
 	bool                       m_cache_dirty;   // true if we need to (re)generate the resident block
 	bool                       m_isdrc;         // true if we're in DRC mode (latched from allow_drc())
+	u8                         m_drc_redo_scratch; // DRC cold-path landing for access_to_be_redone()
 	int                        m_drc_labelnum;  // UML label counter for the resident block's code labels
 
 	// Typed constructor
@@ -259,6 +260,8 @@ protected:
 	static bool is_native_opcode(u16 opword);   // the predicate identifying opcodes with a native fast-path
 	void func_interpret_quantum();              // run the interpreter for the granted quantum (the cfunc body)
 	static void cfunc_interpret_quantum(void *param);
+	void func_take_access_to_be_redone();       // read-and-clear the redo flag into m_drc_redo_scratch (cold path)
+	static void cfunc_take_access_to_be_redone(void *param);
 
 	// True iff this exact device type should use the DRC arm.  Boundary L scopes
 	// the DRC to the plain M68000 only (minimal blast radius); subclasses that
