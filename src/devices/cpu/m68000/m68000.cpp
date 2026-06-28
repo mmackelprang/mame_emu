@@ -283,6 +283,18 @@ void m68000_device::cfunc_take_access_to_be_redone(void *param)
 	static_cast<m68000_device *>(param)->func_take_access_to_be_redone();
 }
 
+// Native-retire trampoline for the btst-absolute fast-path (O-mem-1).  The
+// interpreter's btst retire calls set_ftu_const(), a 6-way switch on the NEXT
+// opword (m_ird >> 12) that loads m_ftu for the upcoming instruction.  Rather
+// than hand-transcribe that switch into UML (which would duplicate microcode
+// logic that could drift -- violating the single-source rule), the native
+// retire issues one UML_CALLC to this trampoline, which calls the EXACT same
+// set_ftu_const() the interpreter uses.  Runs once per fully-granted btst.
+void m68000_device::cfunc_set_ftu_const(void *param)
+{
+	static_cast<m68000_device *>(param)->set_ftu_const();
+}
+
 // The DRC arm of execute_run().  The dispatch is a SINGLE RESIDENT BLOCK
 // (m68000drc.cpp): the entry block decodes the current opcode in-line and runs
 // a native fast-path or delegates to the interpreter, then exits OUT_OF_CYCLES.

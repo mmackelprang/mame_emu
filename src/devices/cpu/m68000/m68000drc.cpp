@@ -199,7 +199,12 @@ void m68000_device::static_generate_entry_point(drcuml_block &block)
 bool m68000_device::is_native_opcode(u16 opword)
 {
 	// moveq #imm,Dn : 0111 rrr0 dddddddd  (bit 8 must be 0)
-	return (opword & 0xf100) == 0x7000;
+	if((opword & 0xf100) == 0x7000)
+		return true;
+	// btst #n,(xxx).W : 0x0838  /  btst #n,(xxx).L : 0x0839  (mask 0xfffe matches both)
+	if((opword & 0xfffe) == 0x0838)
+		return true;
+	return false;
 }
 
 
@@ -224,6 +229,17 @@ void m68000_device::generate_native_dispatch(drcuml_block &block, uml::code_labe
 		generate_moveq(block);                                        // native moveq CASE 0
 		UML_JMP(block, lbl_delegate);                                 // hand the timing tail to the interpreter
 		UML_LABEL(block, lbl_not_moveq);
+	}
+
+	// btst #n,(xxx).W/.L: (m_ird & 0xfffe) == 0x0838
+	{
+		uml::code_label const lbl_not_btst_abs = m_drc_labelnum++;
+		UML_AND(block, I0, I7, 0xfffe);                               // i0 = opword & 0xfffe
+		UML_CMP(block, I0, 0x0838);
+		UML_JMPc(block, COND_NE, lbl_not_btst_abs);                  // not btst-absolute -> next test / delegate
+		generate_btst_imm8_absolute(block, lbl_delegate);           // emit the native opcode (suspend/fault paths JMP lbl_delegate from within)
+		UML_JMP(block, lbl_delegate);                                // fully-granted path: retired -> hand the timing tail to the interpreter
+		UML_LABEL(block, lbl_not_btst_abs);
 	}
 
 	// (more native opcodes are added here in boundary O, each ending in
@@ -402,4 +418,242 @@ void m68000_device::generate_bus_step(drcuml_block &block, const struct drc_bus_
 
 	// clean path: m_edb is committed; the caller continues to the next step
 	// (m_irc/m_dbin commit and any ALU are emitted by the opcode emitter).
+}
+
+
+//-------------------------------------------------
+//  generate_btst_imm8_absolute - native UML for
+//  btst #n,(xxx).W and btst #n,(xxx).L
+//
+//  Mirrors m68000_device::btst_imm8_adr16_df (.W, 4
+//  reads, substates 1..8) and btst_imm8_adr32_df
+//  (.L, 5 reads, substates 1..10) in m68000-sdf.cpp.
+//  Each read is a generate_bus_step() (the charge +
+//  two-way suspend + address-error).  Between reads
+//  this emits the opcode-specific architectural setup
+//  (m_aob/m_pc/m_au/m_at/m_dcr/m_base_ssw/...) and the
+//  m_irc/m_dbin commits, and after the data read the
+//  Z = !(data_byte & (1 << (m_dcr & 7))) computation.
+//  On a fully-granted instruction it runs every read
+//  then retires (set_ftu_const via cfunc, m_inst_state
+//  = next) and returns to the caller (which JMPs the
+//  delegate); on a suspend/fault generate_bus_step
+//  yields to lbl_delegate and the PARTIAL interpreter
+//  handler (m68000-sdp.cpp) resumes at the substate.
+//  I7 holds m_ird (the opword), preserved across reads.
+//
+//  Field widths (m68000.h): m_aob/m_au/m_pc/m_at/m_dt
+//  are u32 (SIZE_DWORD); m_irc/m_ir/m_ird/m_dbin/m_edb/
+//  m_sr/m_base_ssw are u16 (SIZE_WORD); m_dcr is u8
+//  (SIZE_BYTE) -- the SIZE_ on every LOAD/STORE matches
+//  the target field's width.
+//
+//  The interpreter's intermediate alu_eor8(m_dt,m_dbin)
+//  and alu_and8(m_dbin,0xffff) are intentionally NOT
+//  emitted: both take their operands BY VALUE (they do
+//  not modify m_dt or m_dbin), they write only m_aluo/
+//  m_isr -- which are not in the oracle's compared
+//  architectural state and are recomputed by the partial
+//  handler on resume -- and their results are overwritten
+//  before any sr_* commit.  Only the final
+//  alu_and8(m_dbin,1<<(m_dcr&7))+sr_z is architecturally
+//  live (it sets SR.Z); that is the compute_z below.
+//-------------------------------------------------
+
+void m68000_device::generate_btst_imm8_absolute(drcuml_block &block, uml::code_label lbl_delegate)
+{
+	// locate an opcode's generated bus-step run (single-sourced from m68000gen.py)
+	auto find_run = [](u16 value) -> const drc_bus_run & {
+		for(const drc_bus_run &r : s_drc_bus_run_table)
+			if(r.value == value)
+				return r;
+		return s_drc_bus_run_table[0]; // unreachable for the wired opcodes
+	};
+
+	// m_base_ssw = SSW_PROGRAM | SSW_R
+	auto ssw_program = [&]() {
+		UML_MOV(block, I0, u32(u16(SSW_PROGRAM | SSW_R)));
+		UML_STORE(block, &m_base_ssw, 0, I0, SIZE_WORD, SCALE_x1);
+	};
+	// m_irc = m_edb; m_dbin = m_edb;
+	auto commit_irc_dbin = [&]() {
+		UML_LOAD(block, I0, &m_edb, 0, SIZE_WORD, SCALE_x1);
+		UML_STORE(block, &m_irc, 0, I0, SIZE_WORD, SCALE_x1);
+		UML_STORE(block, &m_dbin, 0, I0, SIZE_WORD, SCALE_x1);
+	};
+	// m_dbin = m_edb;
+	auto commit_dbin = [&]() {
+		UML_LOAD(block, I0, &m_edb, 0, SIZE_WORD, SCALE_x1);
+		UML_STORE(block, &m_dbin, 0, I0, SIZE_WORD, SCALE_x1);
+	};
+	// read-1 setup (.W and .L identical): m_aob=m_au; m_pc=m_au;
+	//   set_16l(m_dt,m_dbin); m_au+=2; m_base_ssw=SSW_PROGRAM|SSW_R
+	auto setup_read1 = [&]() {
+		UML_LOAD(block, I0, &m_au, 0, SIZE_DWORD, SCALE_x1);          // i0 = m_au
+		UML_STORE(block, &m_aob, 0, I0, SIZE_DWORD, SCALE_x1);        // m_aob = m_au
+		UML_STORE(block, &m_pc, 0, I0, SIZE_DWORD, SCALE_x1);         // m_pc = m_au
+		UML_ADD(block, I1, I0, 2);                                    // i1 = m_au + 2
+		UML_STORE(block, &m_au, 0, I1, SIZE_DWORD, SCALE_x1);         // m_au += 2
+		// set_16l(m_dt,m_dbin): m_dt = (m_dt & 0xffff0000) | (m_dbin & 0xffff)
+		UML_LOAD(block, I2, &m_dt, 0, SIZE_DWORD, SCALE_x1);
+		UML_AND(block, I2, I2, u32(0xffff0000));
+		UML_LOAD(block, I3, &m_dbin, 0, SIZE_WORD, SCALE_x1);         // i3 = m_dbin (zero-extended)
+		UML_OR(block, I2, I2, I3);
+		UML_STORE(block, &m_dt, 0, I2, SIZE_DWORD, SCALE_x1);         // m_dt = set_16l(m_dt, m_dbin)
+		ssw_program();
+	};
+	// data-read setup (.W and .L identical): m_aob=m_at; m_au=m_pc+2;
+	//   m_base_ssw=SSW_DATA|SSW_R
+	auto setup_dataread = [&]() {
+		UML_LOAD(block, I0, &m_at, 0, SIZE_DWORD, SCALE_x1);
+		UML_STORE(block, &m_aob, 0, I0, SIZE_DWORD, SCALE_x1);        // m_aob = m_at
+		UML_LOAD(block, I1, &m_pc, 0, SIZE_DWORD, SCALE_x1);
+		UML_ADD(block, I1, I1, 2);
+		UML_STORE(block, &m_au, 0, I1, SIZE_DWORD, SCALE_x1);         // m_au = m_pc + 2
+		UML_MOV(block, I0, u32(u16(SSW_DATA | SSW_R)));
+		UML_STORE(block, &m_base_ssw, 0, I0, SIZE_WORD, SCALE_x1);    // m_base_ssw = SSW_DATA | SSW_R
+	};
+	// Z computation: alu_and8(m_dbin, 1<<(m_dcr&7)); sr_z();
+	//   m_sr = (m_sr & ~SR_Z) | ((m_dbin & (1<<(m_dcr&7))) ? 0 : SR_Z)
+	auto compute_z = [&]() {
+		UML_LOAD(block, I0, &m_dcr, 0, SIZE_BYTE, SCALE_x1);          // i0 = m_dcr
+		UML_AND(block, I0, I0, 7);                                    // i0 = m_dcr & 7
+		UML_MOV(block, I1, 1);
+		UML_SHL(block, I1, I1, I0);                                   // i1 = 1 << (m_dcr & 7)
+		UML_LOAD(block, I2, &m_dbin, 0, SIZE_WORD, SCALE_x1);         // i2 = m_dbin (data byte)
+		UML_AND(block, I2, I2, I1);                                   // i2 = tested bit
+		UML_LOAD(block, I3, &m_sr, 0, SIZE_WORD, SCALE_x1);
+		UML_AND(block, I3, I3, u32(u16(~SR_Z)));                      // clear Z
+		UML_CMP(block, I2, 0);
+		UML_SETc(block, COND_E, I4);                                  // i4 = (tested bit == 0) ? 1 : 0
+		UML_SHL(block, I4, I4, 2);                                    // i4 = Z ? SR_Z(0x04) : 0
+		UML_OR(block, I3, I3, I4);
+		UML_STORE(block, &m_sr, 0, I3, SIZE_WORD, SCALE_x1);          // m_sr = (m_sr & ~SR_Z) | Z
+	};
+	// final-prefetch (btsm1) setup: m_aob=m_au; m_ir=m_irc; m_pc=m_au; m_au+=2;
+	//   m_ird=m_ir; if(m_next_state!=S_TRACE) m_next_state=m_int_next_state; SSW_PROGRAM
+	auto setup_final_prefetch = [&]() {
+		UML_LOAD(block, I0, &m_au, 0, SIZE_DWORD, SCALE_x1);
+		UML_STORE(block, &m_aob, 0, I0, SIZE_DWORD, SCALE_x1);        // m_aob = m_au
+		UML_STORE(block, &m_pc, 0, I0, SIZE_DWORD, SCALE_x1);         // m_pc = m_au
+		UML_ADD(block, I1, I0, 2);
+		UML_STORE(block, &m_au, 0, I1, SIZE_DWORD, SCALE_x1);         // m_au += 2
+		UML_LOAD(block, I2, &m_irc, 0, SIZE_WORD, SCALE_x1);          // i2 = m_irc
+		UML_STORE(block, &m_ir, 0, I2, SIZE_WORD, SCALE_x1);          // m_ir = m_irc
+		UML_STORE(block, &m_ird, 0, I2, SIZE_WORD, SCALE_x1);         // m_ird = m_ir
+		UML_LOAD(block, I3, &m_next_state, 0, SIZE_DWORD, SCALE_x1);
+		UML_LOAD(block, I4, &m_int_next_state, 0, SIZE_DWORD, SCALE_x1);
+		UML_CMP(block, I3, u32(S_TRACE));
+		UML_MOVc(block, COND_NE, I3, I4);                            // (next_state != S_TRACE) ? int_next_state : kept
+		UML_STORE(block, &m_next_state, 0, I3, SIZE_DWORD, SCALE_x1);
+		ssw_program();
+	};
+	// retire: m_irc=m_edb; m_dbin=m_edb; set_ftu_const();
+	//   m_inst_state = m_next_state ? m_next_state : m_decode_table[m_ird];
+	//   if(m_sr & SR_T) m_next_state = S_TRACE;
+	auto retire = [&]() {
+		commit_irc_dbin();
+		UML_CALLC(block, &m68000_device::cfunc_set_ftu_const, this);  // set_ftu_const() -- single-sourced, not hand-transcribed
+		uml::code_label const lbl_have_next = m_drc_labelnum++;
+		UML_LOAD(block, I0, &m_next_state, 0, SIZE_DWORD, SCALE_x1);  // i0 = m_next_state
+		UML_CMP(block, I0, 0);
+		UML_JMPc(block, COND_NE, lbl_have_next);                      // next_state != 0 -> use it
+			UML_LOAD(block, I1, &m_ird, 0, SIZE_WORD, SCALE_x1);      // i1 = m_ird (new opword)
+			UML_LOAD(block, I0, m_decode_table.data(), I1, SIZE_WORD, SCALE_x2); // i0 = m_decode_table[m_ird]
+		UML_LABEL(block, lbl_have_next);
+		UML_STORE(block, &m_inst_state, 0, I0, SIZE_WORD, SCALE_x1);  // m_inst_state = next_state ?: decode_table[m_ird]
+		uml::code_label const lbl_no_trace = m_drc_labelnum++;
+		UML_LOAD(block, I2, &m_sr, 0, SIZE_WORD, SCALE_x1);
+		UML_TEST(block, I2, u32(u16(SR_T)));
+		UML_JMPc(block, COND_Z, lbl_no_trace);                       // !(SR & T) -> done
+			UML_MOV(block, I3, u32(S_TRACE));
+			UML_STORE(block, &m_next_state, 0, I3, SIZE_DWORD, SCALE_x1); // m_next_state = S_TRACE
+		UML_LABEL(block, lbl_no_trace);
+	};
+
+	uml::code_label const lbl_absl = m_drc_labelnum++;
+	uml::code_label const lbl_done = m_drc_labelnum++;
+
+	UML_AND(block, I0, I7, 0x0001);                                  // i0 = opword & 1  (0=.W absw, 1=.L absl)
+	UML_CMP(block, I0, 0);
+	UML_JMPc(block, COND_NE, lbl_absl);
+
+	// ---- .W arm: btst #n,(xxx).W  (value 0x0838, 4 reads) ----
+	{
+		const drc_bus_run &run = find_run(0x0838);
+		setup_read1();
+		generate_bus_step(block, s_drc_bus_step_table[run.first + 0], lbl_delegate);  // read 1 (ext word)
+		commit_irc_dbin();
+		// read-2 setup (.W): m_aob=m_au; m_pc=m_au; m_dcr=m_dt; m_at=ext32(m_dbin); m_au=ext32(m_dbin); SSW_PROGRAM
+		UML_LOAD(block, I0, &m_au, 0, SIZE_DWORD, SCALE_x1);
+		UML_STORE(block, &m_aob, 0, I0, SIZE_DWORD, SCALE_x1);
+		UML_STORE(block, &m_pc, 0, I0, SIZE_DWORD, SCALE_x1);
+		UML_LOAD(block, I1, &m_dt, 0, SIZE_DWORD, SCALE_x1);
+		UML_STORE(block, &m_dcr, 0, I1, SIZE_BYTE, SCALE_x1);         // m_dcr = m_dt (u8)
+		UML_LOAD(block, I2, &m_dbin, 0, SIZE_WORD, SCALE_x1);
+		UML_SEXT(block, I2, I2, SIZE_WORD);                           // i2 = ext32(m_dbin) = s32(s16(m_dbin))
+		UML_STORE(block, &m_at, 0, I2, SIZE_DWORD, SCALE_x1);         // m_at = ext32(m_dbin)
+		UML_STORE(block, &m_au, 0, I2, SIZE_DWORD, SCALE_x1);         // m_au = ext32(m_dbin)
+		ssw_program();
+		generate_bus_step(block, s_drc_bus_step_table[run.first + 1], lbl_delegate);  // read 2 (refill)
+		commit_irc_dbin();
+		setup_dataread();
+		generate_bus_step(block, s_drc_bus_step_table[run.first + 2], lbl_delegate);  // data read (byte-lane, no addr-error)
+		commit_dbin();
+		compute_z();
+		setup_final_prefetch();
+		generate_bus_step(block, s_drc_bus_step_table[run.first + 3], lbl_delegate);  // read 4 (final prefetch)
+		retire();
+		UML_JMP(block, lbl_done);
+	}
+
+	UML_LABEL(block, lbl_absl);
+	// ---- .L arm: btst #n,(xxx).L  (value 0x0839, 5 reads) ----
+	{
+		const drc_bus_run &run = find_run(0x0839);
+		setup_read1();
+		generate_bus_step(block, s_drc_bus_step_table[run.first + 0], lbl_delegate);  // read 1 (abs-addr hi)
+		commit_irc_dbin();
+		// read-2 setup (.L): m_aob=m_au; set_16h(m_at,m_dbin); m_au+=2; SSW_PROGRAM
+		UML_LOAD(block, I0, &m_au, 0, SIZE_DWORD, SCALE_x1);
+		UML_STORE(block, &m_aob, 0, I0, SIZE_DWORD, SCALE_x1);
+		UML_ADD(block, I1, I0, 2);
+		UML_STORE(block, &m_au, 0, I1, SIZE_DWORD, SCALE_x1);
+		// set_16h(m_at,m_dbin): m_at = (m_at & 0x0000ffff) | (m_dbin << 16)
+		UML_LOAD(block, I2, &m_at, 0, SIZE_DWORD, SCALE_x1);
+		UML_AND(block, I2, I2, u32(0x0000ffff));
+		UML_LOAD(block, I3, &m_dbin, 0, SIZE_WORD, SCALE_x1);
+		UML_SHL(block, I3, I3, 16);
+		UML_OR(block, I2, I2, I3);
+		UML_STORE(block, &m_at, 0, I2, SIZE_DWORD, SCALE_x1);         // m_at = set_16h(m_at, m_dbin)
+		ssw_program();
+		generate_bus_step(block, s_drc_bus_step_table[run.first + 1], lbl_delegate);  // read 2 (abs-addr lo)
+		commit_dbin();                                               // .L read 2 commits m_dbin only
+		// read-3 setup (.L): m_aob=m_au; m_pc=m_au; m_dcr=m_dt; set_16l(m_at,m_dbin);
+		//   m_au=merge_16_32(high16(m_at),m_dbin) == m_at; SSW_PROGRAM
+		UML_LOAD(block, I0, &m_au, 0, SIZE_DWORD, SCALE_x1);
+		UML_STORE(block, &m_aob, 0, I0, SIZE_DWORD, SCALE_x1);
+		UML_STORE(block, &m_pc, 0, I0, SIZE_DWORD, SCALE_x1);
+		UML_LOAD(block, I1, &m_dt, 0, SIZE_DWORD, SCALE_x1);
+		UML_STORE(block, &m_dcr, 0, I1, SIZE_BYTE, SCALE_x1);         // m_dcr = m_dt (u8)
+		UML_LOAD(block, I2, &m_at, 0, SIZE_DWORD, SCALE_x1);
+		UML_AND(block, I2, I2, u32(0xffff0000));                      // set_16l keeps high 16 of m_at
+		UML_LOAD(block, I3, &m_dbin, 0, SIZE_WORD, SCALE_x1);
+		UML_OR(block, I2, I2, I3);                                    // i2 = (m_at & 0xffff0000) | m_dbin
+		UML_STORE(block, &m_at, 0, I2, SIZE_DWORD, SCALE_x1);         // m_at = set_16l(m_at, m_dbin)
+		UML_STORE(block, &m_au, 0, I2, SIZE_DWORD, SCALE_x1);         // m_au = merge_16_32(high16(m_at), m_dbin)
+		ssw_program();
+		generate_bus_step(block, s_drc_bus_step_table[run.first + 2], lbl_delegate);  // read 3 (refill)
+		commit_irc_dbin();
+		setup_dataread();
+		generate_bus_step(block, s_drc_bus_step_table[run.first + 3], lbl_delegate);  // data read (byte-lane, no addr-error)
+		commit_dbin();
+		compute_z();
+		setup_final_prefetch();
+		generate_bus_step(block, s_drc_bus_step_table[run.first + 4], lbl_delegate);  // read 5 (final prefetch)
+		retire();
+		UML_JMP(block, lbl_done);
+	}
+
+	UML_LABEL(block, lbl_done);
 }

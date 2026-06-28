@@ -258,11 +258,13 @@ protected:
 	void generate_native_dispatch(drcuml_block &block, uml::code_label lbl_delegate); // emit the in-block native-opcode dispatch (I7 = opword)
 	void generate_moveq(drcuml_block &block);   // native UML for moveq #imm,Dn (boundary M's first native opcode; decodes m_ird at runtime)
 	void generate_bus_step(drcuml_block &block, const struct drc_bus_step &step, uml::code_label lbl_delegate); // one native 68000 bus read step (ADR 0007)
+	void generate_btst_imm8_absolute(drcuml_block &block, uml::code_label lbl_delegate); // native btst #n,(xxx).W/.L (O-mem-1)
 	static bool is_native_opcode(u16 opword);   // the predicate identifying opcodes with a native fast-path
 	void func_interpret_quantum();              // run the interpreter for the granted quantum (the cfunc body)
 	static void cfunc_interpret_quantum(void *param);
 	void func_take_access_to_be_redone();       // read-and-clear the redo flag into m_drc_redo_scratch (cold path)
 	static void cfunc_take_access_to_be_redone(void *param);
+	static void cfunc_set_ftu_const(void *param); // native-retire trampoline to set_ftu_const() (single-sourced, not hand-transcribed)
 
 	// True iff this exact device type should use the DRC arm.  Boundary L scopes
 	// the DRC to the plain M68000 only (minimal blast radius); subclasses that
