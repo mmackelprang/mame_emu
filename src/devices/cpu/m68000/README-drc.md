@@ -75,15 +75,16 @@ insensitive cycle cost and no fault surface in user mode:
 - Indexed / brief-extension modes `(d8,An,Xn)` (`dais`) and `(d8,PC,Xn)` (`dpci`) — the
   index extension word's timing and the scaled-index path are deferred.
 - Absolute modes `(xxx).W` / `(xxx).L` (`adr16` / `adr32`) — `btst #n,(xxx).W/.L` is the
-  first native absolute-EA opcode (O-mem-1, via `generate_bus_step()`); all other
-  absolute-EA opcodes remain `cfunc_`, deferred to later O-mem increments.
+  first native absolute-EA opcode (O-mem-1, via `generate_bus_step()`), **on a flat-topology
+  non-MMU bus only** (`drc_native_mem_ea_allowed()`); all other absolute-EA opcodes remain
+  `cfunc_`, deferred to later O-mem increments.
 - All `movem` register lists (`list` / `listp`), `movep`, `link` / `unlk`, `pea` / `lea`,
   `exg`, `ext`, `swap`, `jmp` / `jsr`, `dbcc`, `chk`, shifts/rotates
   (`asl`/`asr`/`lsl`/`lsr`/`rol`/`ror`/`roxl`/`roxr`), multiply/divide
   (`muls`/`mulu`/`divs`/`divu`), BCD (`abcd`/`sbcd`/`nbcd`), extended ALU
   (`addx`/`subx`/`negx`), bit ops `btst`/`bchg`/`bclr`/`bset` (except
-  `btst #n,(xxx).W/.L`, native as of O-mem-1), `tas`, and the
-  `ccr` / `sr` / `usp` operand forms — all `cfunc_` in increment 1.
+  `btst #n,(xxx).W/.L`, native as of O-mem-1 **on a flat-topology non-MMU bus only**), `tas`,
+  and the `ccr` / `sr` / `usp` operand forms — all `cfunc_` in increment 1.
 
 ### Hard `cfunc_` boundaries (never native in increment 1, by category)
 
@@ -190,4 +191,19 @@ This document is updated when the native set changes (each coverage-widening inc
 | Opcode | Boundary | Native emission |
 |---|---|---|
 | `moveq #imm,Dn` | M | CASE 0 native (register/flag write + prefetch-pipe advance); timing tail `cfunc_`'d to the interpreter via the hybrid handoff. |
-| `btst #n,(xxx).W` / `.L` | O-mem-1 | Full native via `generate_bus_step()` — 4-read (.W) / 5-read (.L) interruptible-read sequence with per-bus-cycle charge, suspend checkpoint, and address-error branch; resume after a mid-instruction yield owned by the interpreter's partial handler (ADR 0007 OQ-1). |
+| `btst #n,(xxx).W` / `.L` | O-mem-1 | Full native via `generate_bus_step()` — 4-read (.W) / 5-read (.L) interruptible-read sequence with per-bus-cycle charge, suspend checkpoint, and address-error branch; resume after a mid-instruction yield owned by the interpreter's partial handler (ADR 0007 OQ-1). **Native ONLY on a flat-topology, non-MMU bus (`drc_native_mem_ea_allowed()`): when a driver configures `AS_OPCODES` (decrypted opcodes, e.g. FD1094) / user spaces / an MMU the opcode stays `cfunc_` (ADR 0007 Addendum 2026-06-28).** |
+
+### Known limitations
+
+- **Native memory-EA address space (`drc_native_mem_ea_allowed()`).** `generate_bus_step()` reads via
+  `UML_READ(SPACE_PROGRAM)`. That is correct for every access only when the bound bus has no separate
+  `AS_OPCODES` (decrypted opcodes), no `AS_USER_PROGRAM`/`AS_USER_OPCODES`, and no MMU — i.e. all of
+  `m_s_program`/`m_s_opcodes`/`m_s_uprogram`/`m_s_uopcodes` resolve to the same `address_space` and
+  `m_mmu == nullptr`. The native memory-EA dispatch arms are gated on this compile-time predicate; on
+  any other topology the opcode falls through to `cfunc_` (ADR 0007 Addendum 2026-06-28).
+- **Non-interruptible reads (OQ-6, deferred to O-mem-2).** Native memory-EA reads use non-interruptible
+  `UML_READ`, exact only on non-deferring buses (`UML_READ ≡ read_interruptible` on plain RAM/ROM, which
+  never defers, charges no wait-states, and never sets `m_access_to_be_redone`); interruptible/wait-state
+  native reads on deferring-tap buses are deferred to ADR 0007 **OQ-6** (O-mem-2). Within the gate, no
+  in-scope plain-M68000 DRC driver taps the program/data path, so the descriptor's redo path is
+  gated-by-absence (dormant-but-correct).

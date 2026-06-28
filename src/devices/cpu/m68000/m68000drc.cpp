@@ -228,6 +228,8 @@ bool m68000_device::is_native_opcode(u16 opword)
 
 void m68000_device::generate_native_dispatch(drcuml_block &block, uml::code_label lbl_delegate)
 {
+	m_drc_native_mem_ea_arms = 0; // emission probe: counts gated memory-EA arms actually emitted (Task 7)
+
 	// moveq: (m_ird & 0xf100) == 0x7000
 	{
 		uml::code_label const lbl_not_moveq = m_drc_labelnum++;
@@ -239,15 +241,21 @@ void m68000_device::generate_native_dispatch(drcuml_block &block, uml::code_labe
 		UML_LABEL(block, lbl_not_moveq);
 	}
 
-	// btst #n,(xxx).W/.L: (m_ird & 0xfffe) == 0x0838
+	// btst #n,(xxx).W/.L: (m_ird & 0xfffe) == 0x0838 -- native ONLY behind the
+	// space-topology gate (ADR 0007 Addendum 2026-06-28).  When the bound bus
+	// configures AS_OPCODES / user spaces / an MMU, the arm is NOT emitted and
+	// dispatch falls through to lbl_delegate (cfunc_), exactly as before O-mem-1
+	// -- SPACE_PROGRAM would otherwise read the wrong space.
+	if (drc_native_mem_ea_allowed())
 	{
 		uml::code_label const lbl_not_btst_abs = m_drc_labelnum++;
-		UML_AND(block, I0, I7, 0xfffe);                               // i0 = opword & 0xfffe
+		UML_AND(block, I0, I7, 0xfffe);                              // i0 = opword & 0xfffe
 		UML_CMP(block, I0, 0x0838);
-		UML_JMPc(block, COND_NE, lbl_not_btst_abs);                  // not btst-absolute -> next test / delegate
-		generate_btst_imm8_absolute(block, lbl_delegate);           // emit the native opcode (suspend/fault paths JMP lbl_delegate from within)
-		UML_JMP(block, lbl_delegate);                                // fully-granted path: retired -> hand the timing tail to the interpreter
+		UML_JMPc(block, COND_NE, lbl_not_btst_abs);                 // not btst-absolute -> next test / delegate
+		generate_btst_imm8_absolute(block, lbl_delegate);          // emit the native opcode (suspend/fault paths JMP lbl_delegate from within)
+		UML_JMP(block, lbl_delegate);                               // fully-granted path: retired -> hand the timing tail to the interpreter
 		UML_LABEL(block, lbl_not_btst_abs);
+		m_drc_native_mem_ea_arms++;                                 // emission probe (Task 7)
 	}
 
 	// (more native opcodes are added here in boundary O, each ending in

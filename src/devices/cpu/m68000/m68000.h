@@ -241,6 +241,7 @@ protected:
 	bool                       m_cache_dirty;   // true if we need to (re)generate the resident block
 	bool                       m_isdrc;         // true if we're in DRC mode (latched from allow_drc())
 	u8                         m_drc_redo_scratch; // DRC cold-path landing for access_to_be_redone()
+	u32                        m_drc_native_mem_ea_arms; // # of gated memory-EA dispatch arms emitted in the last generate_native_dispatch (0 => gated out); test/observability only
 	int                        m_drc_labelnum;  // UML label counter for the resident block's code labels
 
 	// Typed constructor
@@ -272,6 +273,15 @@ protected:
 	// subclass that is behaviourally a plain 68000 may override this to opt in.
 	// (Defined out-of-line in m68000.cpp, where the M68000 device type is in scope.)
 	virtual bool drc_supported_for_type() const;
+
+	// True iff the bound bus topology lets a native memory-EA access use
+	// SPACE_PROGRAM for every read with no opcode/user-space distinction and no
+	// MMU translation.  Evaluated at resident-block emit time (post device_start:
+	// the space bindings and m_mmu are fixed by then).  Guards every native
+	// memory-EA dispatch arm (ADR 0007 Addendum 2026-06-28); the register-only
+	// moveq arm is unaffected.  SR_S is deliberately ABSENT -- identical m_s_*
+	// make SPACE_PROGRAM correct in both supervisor and user mode.
+	bool drc_native_mem_ea_allowed() const;
 
 	// allocate a UML code handle if not already allocated (called from both
 	// m68000.cpp and m68000drc.cpp, so it is a non-inline out-of-line static)

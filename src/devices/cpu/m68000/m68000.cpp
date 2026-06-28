@@ -58,6 +58,7 @@ m68000_device::m68000_device(const machine_config &mconfig, device_type type, co
 	  m_cache_dirty(true),
 	  m_isdrc(false),
 	  m_drc_redo_scratch(0),
+	  m_drc_native_mem_ea_arms(0),
 	  m_drc_labelnum(1)
 {
 }
@@ -74,6 +75,15 @@ bool m68000_device::drc_supported_for_type() const
 {
 	// Boundary L scopes the DRC arm to the plain M68000 only.
 	return type() == M68000;
+}
+
+bool m68000_device::drc_native_mem_ea_allowed() const
+{
+	return !m_disable_spaces
+		&& (m_mmu == nullptr)            // no MMU / indirect-handler path (ADR 0007 §5)
+		&& (m_s_program == m_s_opcodes)  // no separate AS_OPCODES (decrypted opcodes)
+		&& (m_s_program == m_s_uprogram) // no separate AS_USER_PROGRAM
+		&& (m_s_program == m_s_uopcodes);// no separate AS_USER_OPCODES
 }
 
 void m68000_device::set_current_mmu(mmu *mmu)
