@@ -1,6 +1,11 @@
 # ADR 0007 — m68000 DRC native memory-EA + suspend / cycle / address-error mechanism
 
-> **Status:** Accepted (all 5 open questions resolved by the owner; O-mem-1 planned —
+> **Status:** Accepted, **amended 2026-06-28** by the
+> [Addendum / Resolution](#addendum--resolution-2026-06-28--o-mem-1-pre-merge-review) at the
+> foot of this file (a pre-merge review of O-mem-1 found §1's address-space claim inaccurate and
+> §5's `cfunc_` boundary unenforced; the addendum corrects §1, makes §5 an enforceable compile-time
+> gate, and is the controlling text where it conflicts with §1/§5 below). Original: Accepted (all 5
+> open questions resolved by the owner; O-mem-1 planned —
 > see [`plan/phase-2-o-mem-1-btst-absolute.md`](../plan/phase-2-o-mem-1-btst-absolute.md)) ·
 > **Phase:** P2 · **Owner:** the boundary-M owner (committed to building it)
 > **Type:** Addendum to **[0002](0002-m68000-drcuml-port.md)** (it implements 0002 §3's
@@ -171,6 +176,14 @@ mechanism reviewable.
 ## Decision — the seven sub-decisions
 
 ### 1. Native memory-access primitive
+
+> ⚠ **Corrected by the [Addendum (2026-06-28)](#addendum--resolution-2026-06-28--o-mem-1-pre-merge-review).**
+> The claim below that "the 68000 has one program space" is **inaccurate**: when a driver configures
+> `AS_OPCODES` (decrypted opcodes, e.g. FD1094) and/or `AS_USER_PROGRAM`/`AS_USER_OPCODES`, the
+> interpreter's prefetch reads use `m_opcodes` and data reads use `m_program` — *SR_S-swapped, distinct*
+> spaces — so blanket `SPACE_PROGRAM` reads the wrong memory. `SPACE_PROGRAM` for every read is correct
+> **only under a flat topology**, which the addendum makes a hard compile-time gate. Read the addendum
+> before implementing this section.
 
 Emit native accesses with the existing UML opcodes, against the m68000's single program space:
 
@@ -351,6 +364,14 @@ UML_LABEL(block, lbl_no_fault);
   `S_ADDRESS_ERROR` from the even/odd test and otherwise yields.
 
 ### 5. Integration with the dual-path, the `cfunc_` fallback, and the gate
+
+> ⚠ **Made enforceable by the [Addendum (2026-06-28)](#addendum--resolution-2026-06-28--o-mem-1-pre-merge-review).**
+> The "stays `cfunc_`" intent below was stated but **not enforced** — the as-built O-mem-1 dispatch had
+> no space/MMU gate, so it emitted native `btst`-absolute even when `AS_OPCODES`/user spaces were
+> configured (a silent regression vs the prior all-`cfunc_` behaviour). The addendum defines the exact
+> compile-time predicate `drc_native_mem_ea_allowed()` that every native memory-EA arm must be guarded
+> by, and resolves that `SR_S` is **not** a runtime branch. Read the addendum before implementing this
+> section.
 
 - **`m_isdrc` dual-path unchanged.** This mechanism lives entirely inside the resident block's native
   dispatch (`generate_native_dispatch`, `m68000drc.cpp:216`); `execute_run()` / `execute_run_drc()`
@@ -557,3 +578,199 @@ these answers; they are not re-litigated.
    suspend path only (zero hot-path cost); no shared `cpu_device` change. `UML_LOAD`-ing the private field
    (semantically wrong — would not clear) and adding a new clearing accessor to `cpu_device` (broader blast
    radius) are both rejected. *Plan: Task 2 (the cfunc + scratch field), consumed by Task 3.*
+
+---
+
+## Addendum / Resolution (2026-06-28) — O-mem-1 pre-merge review
+
+> **Status:** Accepted. This addendum is the controlling text where it conflicts with §1 or §5 above.
+> It does **not** change the mechanism (native read + native checkpoint), the increment plan (§6), or
+> any of OQ-1…OQ-5. It corrects one factual error (§1) and converts one stated-but-unenforced boundary
+> (§5) into a hard, testable gate. Triggered by a pre-merge review of the O-mem-1 branch
+> (`feat/o-mem-1-btst-absolute`, unmerged) against the as-built `m68000drc.cpp`.
+
+### What the review found (both verified live against the tree — DRC is default-on for `type()==M68000`)
+
+1. **Critical — wrong address space (correctness).** `generate_bus_step()` emits
+   `UML_READ(..., SPACE_PROGRAM)` for *every* read (`m68000drc.cpp:367`). The interpreter handler
+   `btst_imm8_adr16_df` reads prefetch words via **`m_opcodes.read_interruptible`**
+   (`m68000-sdf.cpp:20119, 20145, 20194`) and the data word via **`m_program.read_interruptible`**
+   (`:20168`). `m_program`/`m_opcodes` are the **dynamic, SR_S-swapped** accessors
+   (`update_user_super()`, `m68000.cpp:614-628`): in supervisor they are `m_r_program`/`m_r_opcodes`,
+   in user they are `m_r_uprogram`/`m_r_uopcodes`. Those bind at `device_start` (`m68000.cpp:373-376`)
+   to **distinct address spaces** whenever a driver configures `AS_OPCODES` (decrypted opcodes — the
+   FD1094/FD1089 Sega System 16/18 class, which includes the profiled target's family), or
+   `AS_USER_PROGRAM`/`AS_USER_OPCODES`. On such a machine the native prefetch would fetch from
+   `AS_PROGRAM` (raw/encrypted bytes) instead of `AS_OPCODES` (the decrypted stream) → wrong extension
+   word → wrong absolute address → wrong data read → mis-execution. This is a **regression vs the prior
+   all-`cfunc_` behaviour**, where those reads went through the correct dynamic accessor. §1's
+   "the 68000 has one program space" is the root inaccuracy.
+
+2. **High — non-interruptible read (accuracy on tapped/wait-state buses).** `UML_READ` lowers to the
+   plain space accessor, **not** `read_interruptible`. The two differ *only* when a `before_time` /
+   `defer_access` tap on the accessed address defers the access (setting `cpu_device::m_access_to_be_redone`
+   and charging wait time). On such a tap the interpreter redoes the access and charges the wait; the
+   native path does neither, and the redo arm of the descriptor checkpoint (`cfunc_take_access_to_be_redone`,
+   `m68000drc.cpp:395`) is **dead under `UML_READ`** because the flag is never set. On plain RAM/ROM
+   (no tap) `UML_READ ≡ read_interruptible` exactly — same value, zero extra cycles, flag never set.
+
+3. **Why the oracle is blind to both.** Leg A/B run flat RAM, a single program space, supervisor mode,
+   no wait-states. That bus *satisfies the gate this addendum adds* (so the native path is always taken
+   and is exact there) and *never configures the topologies finding 1 breaks* (so the bug is unexercised).
+   "Oracle green" therefore certifies the native path **only for the flat bus class** — it is necessary
+   and sufficient for that class, and says nothing about the gated-out topologies. This is weighted
+   explicitly in the merge-gate section below.
+
+### Decision
+
+**Adopt option (a): a compile-time space-topology gate.** Native memory-EA opcodes (`btst`-absolute now,
+and every O-mem-2…5 opcode that follows) are emitted into the resident dispatch **only when the bound bus
+topology makes `SPACE_PROGRAM` the correct target for every access**; otherwise the opcode is not added to
+the native dispatch and falls through to `cfunc_interpret_quantum` — exactly the pre-O-mem-1 behaviour.
+This *realizes* §5's stated "stays `cfunc_`" intent instead of merely asserting it. Option (b) (route every
+read through `m_program`/`m_opcodes.read_interruptible` via a `cfunc_`) is rejected as the mechanism: it is
+ADR Alternative 3 under a new name — it concedes the native-read speedup that is O-mem-1's entire reason to
+exist (a C call per bus cycle, slower than today's full `cfunc_`), and the read *is* the hot work for these
+opcodes.
+
+**The gate is purely compile-time; `SR_S` is NOT a runtime branch.** This resolves the open question the
+review posed. The space configuration is fixed at `device_start` and the resident block is emitted once
+(in `code_flush_cache`), after start — so the topology is a constant at emit time. The key reason `SR_S`
+need not be a runtime branch: the gate requires all four specific accessors to resolve to the *same*
+`address_space`, and when they do, `update_user_super()` makes `m_program == m_opcodes == space(AS_PROGRAM)`
+in **both** supervisor and user mode. `SPACE_PROGRAM` is therefore correct irrespective of `SR_S`, and the
+fast path stays **100% native** with no per-read space selection and no mode branch. (This does not
+relitigate §5's lock on user/supervisor *space switches*: under the gate there is no switch — the user and
+supervisor spaces are physically the same space.)
+
+### Correction to §1 (address space)
+
+The 68000 core does **not** present a single program space. It presents up to five: `AS_PROGRAM`,
+`AS_OPCODES`, `AS_USER_PROGRAM`, `AS_USER_OPCODES`, `AS_CPU_SPACE` (`memory_logical_space_config`,
+`m68000.cpp:326-339`). Instruction/prefetch fetches go through `m_opcodes`; operand/data accesses through
+`m_program`; both are swapped between the supervisor (`m_r_*`) and user (`m_r_u*`) specific accessors on
+every `SR_S` change. `m_base_ssw = SSW_PROGRAM | SSW_R` vs `SSW_DATA | SSW_R` is an architectural
+bus-status field (consumed only when building a fault frame) and remains an emitted field write — it is
+**not** the space selector and must not be confused with one. The native primitive may use `SPACE_PROGRAM`
+for all reads **only because the gate guarantees every one of `m_s_program`/`m_s_opcodes`/`m_s_uprogram`/
+`m_s_uopcodes` is the identical `address_space`** (and `m_mmu == nullptr`). Outside that gate, prefetch and
+data reads target different UML spaces and/or the user-space set — which is precisely the work §5 keeps in
+the interpreter.
+
+### Enforceable §5 boundary — the exact predicate
+
+Add an instance predicate, evaluated once at resident-block emit time, and guard the native memory-EA
+dispatch arm(s) with it (the register-only `moveq` arm is unaffected — it performs no data access):
+
+```cpp
+// True iff the bound bus topology lets a native memory-EA access use SPACE_PROGRAM
+// for every read with no opcode/user-space distinction and no MMU translation.
+// Evaluated at resident-block emit time (post device_start: the space bindings and
+// m_mmu are fixed by then).  All four m_s_* are address_space* set in device_start
+// (m68000.cpp:373-376); m_mmu is the MMU hook (nullptr on a plain M68000).
+bool m68000_device::drc_native_mem_ea_allowed() const
+{
+    return !m_disable_spaces
+        && (m_mmu == nullptr)            // no MMU / indirect-handler path (ADR §5)
+        && (m_s_program == m_s_opcodes)  // no separate AS_OPCODES (decrypted opcodes)
+        && (m_s_program == m_s_uprogram) // no separate AS_USER_PROGRAM
+        && (m_s_program == m_s_uopcodes);// no separate AS_USER_OPCODES
+}
+```
+
+- **`SR_S` is deliberately absent** — see the Decision: identical `m_s_*` ⇒ `SPACE_PROGRAM` correct in both
+  modes ⇒ no runtime mode branch.
+- **Where it is applied:** in `generate_native_dispatch` (`m68000drc.cpp:229`), wrap the `btst`-absolute
+  arm (and every future memory-EA arm) in `if (drc_native_mem_ea_allowed()) { …emit arm… }`. When false,
+  the arm is simply not emitted and dispatch falls through to `lbl_delegate`. This is a C++ `if` around UML
+  emission — zero runtime cost on the chosen path.
+- **MMU-attachment safety (belt-and-suspenders):** `drc_supported_for_type()` already restricts DRC to the
+  plain `M68000`, which has no MMU, so `m_mmu` is `nullptr` at emit time in every supported config. If a
+  future change lets an MMU attach after the block is emitted, `set_current_mmu()` must set
+  `m_cache_dirty = true` so the resident block regenerates and the gate re-evaluates. Note it; do not rely
+  on it implicitly.
+
+### Interruptibility / wait-states (finding 2) — **DEFERRED, explicitly, not dropped**
+
+O-mem-1 keeps `generate_bus_step()`'s `UML_READ` (non-interruptible). The justification is bounded and
+recorded:
+
+- **Within the gate, on the bus the oracle validates, `UML_READ ≡ read_interruptible`** — plain RAM/ROM
+  never defers, never charges wait-states, and never sets `m_access_to_be_redone`. So Leg B is exact for
+  the right reason, and the descriptor's redo arm is *dormant but correct*: it would fire identically to
+  the interpreter only if the flag were set, which this bus class never does. No code change is required
+  for O-mem-1 beyond the space gate.
+- **The residual divergence** is a flat, un-MMU'd bus that nonetheless installs a `before_time`/`defer_access`
+  tap on a *program or data address actually read by a native memory-EA opcode*. The space gate does **not**
+  exclude that case. No in-scope plain-`M68000` DRC driver does it on the program/data path — the core's
+  only deferring taps are the VPA/autovector taps on `AS_CPU_SPACE` (`default_autovectors_map`,
+  `m68000.cpp:350-362`), which these reads never touch.
+- **Closure requirement (tracked, must not be silently dropped):** before DRC-native memory-EA is enabled
+  on any driver that taps the program/data path — and as the proper exercise of the redo/wait machinery the
+  descriptor models — extend the oracle with a deferring-tap corpus config (a `before_time` tap on the data
+  address) so Leg B drives the redo/wait path. Until that exists, the redo path is **gated-by-absence**.
+  This is logged as a new Open Question (OQ-6) below so it survives into O-mem-2 planning.
+
+### Builder directive (bounded — O-mem-1 only)
+
+1. **Add the predicate.** Declare `bool drc_native_mem_ea_allowed() const;` in `m68000.h` (near
+   `drc_supported_for_type()`, `:274`) and define it in `m68000.cpp` exactly as above.
+2. **Gate the dispatch arm.** In `generate_native_dispatch` (`m68000drc.cpp:229`), wrap **only** the
+   `btst`-absolute arm (`:242-251`) in `if (drc_native_mem_ea_allowed()) { … }`. Leave the `moveq` arm
+   unguarded. Do **not** change `generate_bus_step` or `generate_btst_imm8_absolute` — they remain correct
+   *given* the gate (`SPACE_PROGRAM` is now provably the right space).
+3. **Keep `is_native_opcode(u16)` as the opcode-eligibility predicate** (it stays topology-independent:
+   `btst`-absolute is eligible). The topology gate is the separate `drc_native_mem_ea_allowed()`. The
+   coverage test asserts both facets (next section).
+4. **Do not add an `SR_S` runtime branch, a per-read space parameter, or a `read_interruptible` cfunc.**
+   Those belong to later, separately-scoped increments (AS_OPCODES-native; interruptible-native), not to
+   the mechanism PR.
+5. **Cut-line doc.** In `README-drc.md`, qualify the O-mem-1 row: `btst #n,(xxx).W/.L` is native **only on
+   a flat-topology, non-MMU bus** (`drc_native_mem_ea_allowed()`); on `AS_OPCODES`/user-space/MMU machines
+   it remains `cfunc_`. Record finding-2 deferral (interruptible/wait-state) as a known limitation.
+
+### Merge-gate implication
+
+- **The existing flat-RAM oracle (Leg A/B) stays the correctness gate for the native path** and is
+  unchanged: it runs exactly the flat-topology bus the gate permits, so `btst`-absolute native correctness
+  is certified as before, on the full backend matrix (`drcbex64`, `drcbec` via `CPUORACLE_M68_DRC_C=1`,
+  arm64 on CI). Necessary and sufficient *for the gated bus class*.
+- **It is NOT sufficient to prove the gate itself.** The flat oracle never configures `AS_OPCODES`/user
+  spaces/MMU, so it never exercises the gated-*out* fallback. O-mem-1 must therefore add — and this is the
+  merge-gate delta — a **gate-predicate unit test**: construct `m68000_device` instances with (i) a separate
+  `AS_OPCODES` map, (ii) a user-space map, and (iii) an attached MMU, and assert
+  `drc_native_mem_ea_allowed()` is `false` and the resident block does **not** emit the native `btst` arm
+  (dispatch reaches the `cfunc_` delegate). This is cheap (device construction + a block-emission probe;
+  no corpus run) and directly tests the fix.
+- **Strongly recommended (O-mem-1 if the harness allows, else the first task of O-mem-2):** a second
+  *differential-oracle* config that actually configures a separate `AS_OPCODES` space (distinct contents
+  from `AS_PROGRAM`) and runs Leg B `-drc 0` vs `-drc 1`. With the gate in place the native arm is not
+  emitted there, so this proves the `cfunc_` fallback matches *and* that the DRC does not mis-read the
+  opcode space — i.e. it is the test that would have caught this bug. If it exceeds O-mem-1's scope lock,
+  it is recorded as O-mem-2's opening task, not dropped.
+- **Finding 2's deferring-tap oracle config** is OQ-6 (deferred), as above.
+
+### Consequences delta
+
+- **Good:** the gate is correct-by-construction for O-mem-1 *and* every later memory-EA batch — each new
+  native opcode inherits the single `drc_native_mem_ea_allowed()` guard for free, so widening coverage never
+  re-opens the space-correctness question. The fast path stays fully native (no mode branch).
+- **Cost / honest note on the headline number:** the gate **excludes `AS_OPCODES` (FD1094-class) drivers
+  from the native path**, so if the throughput benchmark names an FD1094 set its `btst`-absolute runs
+  `cfunc_` and shows **no** speedup. O-mem-1's speedup evidence must be measured on a **gate-eligible,
+  flat-topology** 68000 driver (or a decrypted/bootleg set) where `btst`-absolute is hot; the "43% of
+  aurail cycles" figure remains valid as *opcode-selection* justification but does not imply a speedup on
+  aurail-under-FD1094. **Native `btst`-absolute on `AS_OPCODES` machines (supervisor, prefetch →
+  `m_s_opcodes` UML space index, plus its required `AS_OPCODES` oracle config) is a deliberate, recorded
+  O-mem-2+ extension** — deferred precisely because it needs the oracle-harness work above to be gate-
+  validated, and shipping an un-gated space-selection path is exactly the "oracle-blind gap" this review
+  exists to prevent.
+
+### New open question (logged so O-mem-2 planning inherits it)
+
+- **OQ-6 — interruptible/wait-state native reads.** The native path uses non-interruptible `UML_READ`,
+  exact only on non-deferring buses. Decide, before DRC-native memory-EA reaches any deferring-tap driver,
+  whether to (a) gate those buses out (extend `drc_native_mem_ea_allowed()` with a no-deferring-taps
+  condition — needs a clean queryable signal), (b) route the read through a `read_interruptible` cfunc on
+  the affected opcodes only, or (c) add a true interruptible-read UML path. Requires the deferring-tap
+  oracle config to validate whichever is chosen. *Owner decision deferred to O-mem-2.*

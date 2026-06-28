@@ -8,6 +8,16 @@
 
 **Tech Stack:** C++17 (the `m68000_device` / DRCUML emitter, drcbe_x64 + drcbec backends), Python 3 (the `m68000gen.py` generator), GENie/`mingw32-make` build, Catch2 oracle harness (`tests/emu/cpu/cpuoracle.cpp`). MSYS2 UCRT64/MINGW64 toolchain on Windows; appserver Linux for the authoritative `oracle` CI job.
 
+> ⚠ **REQUIRED before Task 4 / Task 5 — read the [ADR 0007 Addendum (2026-06-28)](../adr/0007-m68000-native-memory-ea-suspend-mechanism.md#addendum--resolution-2026-06-28--o-mem-1-pre-merge-review).**
+> A pre-merge review found the as-built dispatch emits native `btst`-absolute even when a driver
+> configures `AS_OPCODES`/user spaces (wrong memory — a regression). Before merge the Builder must
+> (1) add the compile-time predicate `drc_native_mem_ea_allowed()` and guard the `btst`-absolute arm in
+> `generate_native_dispatch` with it (the `moveq` arm stays unguarded), and (2) add a gate-predicate unit
+> test (device with `AS_OPCODES` / user space / MMU ⇒ arm not emitted, dispatch falls to `cfunc_`). The
+> addendum has the exact predicate, the bounded directive, and the merge-gate delta. `SPACE_PROGRAM` for
+> all reads is correct **only under that gate**; do not follow the bare "SPACE_PROGRAM per §1" note in the
+> self-review below without it. Interruptible/wait-state reads (finding 2) are deferred (addendum OQ-6).
+
 ## Global Constraints
 
 These apply to **every** task below — copied verbatim from ADR 0007 + the phase-2 plan + the cut-line doc + the user's workflow rules.
@@ -764,7 +774,7 @@ Expected (to merge, per the auto-merge policy): the appserver Linux `oracle` job
 
 **Placeholder scan:** No `TBD`/`implement later`/`similar to Task N`. The `emit_btst_*` helpers are described as verbatim transcriptions with the exact source lines to copy (`m68000-sdf.cpp:20110-20346`) and one worked example (`set_16l`), not left abstract — the one place a "copy the handler line" instruction is unavoidable, because the helper *is* a 1:1 transcription and inventing different code would be wrong. This is a deliberate "transcribe these exact lines" instruction, not a placeholder.
 
-**Type consistency:** `generate_bus_step(drcuml_block&, const drc_bus_step&, code_label)`, `m_drc_redo_scratch` (u8), `cfunc_take_access_to_be_redone`, `generate_btst_imm8_absolute(drcuml_block&, code_label)`, `s_drc_bus_step_table` / `s_drc_bus_run_table` / `find_bus_run` — names and signatures match across Tasks 1–5. Substate numbers are read from the descriptor (`step.redo_substate`/`completed_substate`), never hard-coded, matching the single-source rule. `SPACE_PROGRAM` (not `SPACE_OPCODES`) for both read kinds, per ADR 0007 §1.
+**Type consistency:** `generate_bus_step(drcuml_block&, const drc_bus_step&, code_label)`, `m_drc_redo_scratch` (u8), `cfunc_take_access_to_be_redone`, `generate_btst_imm8_absolute(drcuml_block&, code_label)`, `s_drc_bus_step_table` / `s_drc_bus_run_table` / `find_bus_run` — names and signatures match across Tasks 1–5. Substate numbers are read from the descriptor (`step.redo_substate`/`completed_substate`), never hard-coded, matching the single-source rule. `SPACE_PROGRAM` (not `SPACE_OPCODES`) for both read kinds — **valid only behind the `drc_native_mem_ea_allowed()` compile-time gate added by the [ADR 0007 Addendum (2026-06-28)](../adr/0007-m68000-native-memory-ea-suspend-mechanism.md#addendum--resolution-2026-06-28--o-mem-1-pre-merge-review); §1's "one program space" was corrected there.**
 
 **Genuinely-new open questions (design is settled; few expected):**
 1. **Bus-step run selection at emit time vs. runtime.** The plan emits two compile-time arms (`.W`/`.L`) selected by a runtime `m_ird & 1` branch, each consuming its own compile-time `find_bus_run` result. An alternative is a single arm that indexes the run table at runtime — rejected as more complex for two opcodes. Not blocking; flagged for the Builder in case the runtime branch on the opword is cleaner in practice.
