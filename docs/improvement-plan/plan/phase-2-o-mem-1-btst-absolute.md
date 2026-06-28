@@ -781,3 +781,313 @@ Expected (to merge, per the auto-merge policy): the appserver Linux `oracle` job
 2. **Whether `m68000-drcdesc.ipp` is already `#include`d in the class scope.** Boundary K created it "nothing includes it yet"; the frontend (boundary L) consumes `s_drc_desc_table`. Task 3 assumes the `.ipp` (now with the bus-step tables) is visible in `m68000drc.cpp`'s translation unit via the class-scope include. If it is included only in `m68000fe.cpp`, Task 3 step 1 must add the include to the `m68000drc.cpp` TU (or move the bus-step tables to a header the translator sees). This is a 5-minute mechanical check the Builder does at Task 3 step 1 — noted so it is not a surprise.
 
 Neither changes the architecture; both are local implementation choices the Builder resolves at the first build.
+
+---
+
+# Addendum tasks (appended 2026-06-28) — the compile-time space-topology gate
+
+**Why this section exists.** Original Tasks 1–5 are **implemented and committed** (7 commits, `c716b8d4`…`c4d1637c`). A pre-merge review then produced the **[ADR 0007 Addendum (2026-06-28)](../adr/0007-m68000-native-memory-ea-suspend-mechanism.md#addendum--resolution-2026-06-28--o-mem-1-pre-merge-review)** (`21022b7d`): the as-built dispatch emits native `btst`-absolute even when a driver configures `AS_OPCODES` / user spaces / an MMU, which reads the **wrong memory** (a regression vs the prior all-`cfunc_` behaviour). Tasks 6–8 below fold in the adjudicated fix. **They supersede the "REQUIRED before Task 4 / Task 5" admonition at the top of this plan** — that pre-condition is now realized as Task 6 (gate) + Task 7 (gate unit test); do not also try to satisfy it inside the committed Tasks 4/5.
+
+**Do NOT re-plan or re-touch the committed work** — `generate_bus_step`, `generate_btst_imm8_absolute`, the `is_native_opcode` patterns, and the descriptor generator are correct *given the gate* (the Addendum: "Do **not** change `generate_bus_step` or `generate_btst_imm8_absolute` — they remain correct *given* the gate"). Tasks 6–8 only add the guard, its test, and the deferred-oracle bookkeeping.
+
+**Field-name verification (done at plan time, 2026-06-28).** Every field in the Addendum predicate was checked against `src/devices/cpu/m68000/m68000.h` and `m68000.cpp` and is correct as written — **no correction needed**:
+
+| Field | Declared | Type | Default |
+|---|---|---|---|
+| `m_disable_spaces` | `m68000.h:187` | `bool` | `false` (`m68000.cpp:52`) |
+| `m_mmu` | `m68000.h:185` | `mmu *` | `nullptr` (`m68000.cpp:51`) |
+| `m_s_program`, `m_s_opcodes`, `m_s_uprogram`, `m_s_uopcodes` | `m68000.h:175` | `address_space *` | bound in `device_start` (`m68000.cpp:373-376`) |
+
+`m_mmu` defaulting to `nullptr` (not `&m_mmu_disabled`) is the load-bearing fact: it makes the gate **true** on a plain flat M68000 (so the native path is taken on the oracle bus) and **false** once `enable_mmu()`/`set_current_mmu()` assign a non-null MMU. The `!m_disable_spaces` clause is first, so when `enable_mmu(true)` has set `m_disable_spaces` the predicate returns `false` **without** dereferencing the then-unbound `m_s_*` pointers — safe by ordering.
+
+---
+
+## Task 6: Compile-time space-topology gate — `drc_native_mem_ea_allowed()`
+
+**Goal:** Emit the native `btst`-absolute dispatch arm **only** when the bound bus topology makes `SPACE_PROGRAM` the correct target for every access; otherwise the arm is compiled out and dispatch falls through to `cfunc_interpret_quantum` (the pre-O-mem-1 behaviour). The `moveq` arm is register-only and stays unguarded.
+
+**Files:**
+- Modify: `src/devices/cpu/m68000/m68000.h` — declare `drc_native_mem_ea_allowed()` beside `drc_supported_for_type()` (`:274`, same access section); declare the emission-probe counter `m_drc_native_mem_ea_arms` beside `m_drc_redo_scratch` (`:243`).
+- Modify: `src/devices/cpu/m68000/m68000.cpp` — define `drc_native_mem_ea_allowed()` beside `drc_supported_for_type()` (`:73`); init `m_drc_native_mem_ea_arms(0)` in the ctor member-init list (`:60`, beside `m_drc_redo_scratch(0)`).
+- Modify: `src/devices/cpu/m68000/m68000drc.cpp` — wrap the `btst`-absolute arm in `generate_native_dispatch` (`:242-251`); reset+increment the probe counter.
+- Modify: `src/devices/cpu/m68000/README-drc.md` — qualify the O-mem-1 rows (native only behind the gate); record the finding-2 / OQ-6 deferral.
+
+**Interfaces:**
+- Produces (consumed by Task 7): `bool drc_native_mem_ea_allowed() const;` and `u32 m_drc_native_mem_ea_arms;` (count of gated memory-EA arms emitted in the most recent `generate_native_dispatch`; `0` ⇒ the `btst`-absolute arm was gated out).
+
+- [ ] **Step 1: Declare the predicate + the emission-probe counter in the header.**
+
+In `src/devices/cpu/m68000/m68000.h`, beside `m_drc_redo_scratch` (`:243`):
+```cpp
+	u32                        m_drc_native_mem_ea_arms; // # of gated memory-EA dispatch arms emitted in the last generate_native_dispatch (0 => gated out); test/observability only
+```
+And beside `drc_supported_for_type()` (`:274`, same access section):
+```cpp
+	// True iff the bound bus topology lets a native memory-EA access use
+	// SPACE_PROGRAM for every read with no opcode/user-space distinction and no
+	// MMU translation.  Evaluated at resident-block emit time (post device_start:
+	// the space bindings and m_mmu are fixed by then).  Guards every native
+	// memory-EA dispatch arm (ADR 0007 Addendum 2026-06-28); the register-only
+	// moveq arm is unaffected.  SR_S is deliberately ABSENT -- identical m_s_*
+	// make SPACE_PROGRAM correct in both supervisor and user mode.
+	bool drc_native_mem_ea_allowed() const;
+```
+
+- [ ] **Step 2: Define the predicate.** In `src/devices/cpu/m68000/m68000.cpp`, beside `drc_supported_for_type()` (`:73`). The field names are verified (see the table above) — emit the Addendum predicate verbatim:
+```cpp
+bool m68000_device::drc_native_mem_ea_allowed() const
+{
+	return !m_disable_spaces
+		&& (m_mmu == nullptr)            // no MMU / indirect-handler path (ADR 0007 §5)
+		&& (m_s_program == m_s_opcodes)  // no separate AS_OPCODES (decrypted opcodes)
+		&& (m_s_program == m_s_uprogram) // no separate AS_USER_PROGRAM
+		&& (m_s_program == m_s_uopcodes);// no separate AS_USER_OPCODES
+}
+```
+
+- [ ] **Step 3: Init the counter.** In the ctor member-init list (`m68000.cpp:60`, beside `m_drc_redo_scratch(0)`), add `m_drc_native_mem_ea_arms(0)` in declaration order (it is declared after `m_drc_redo_scratch`, so place it immediately after to avoid `-Wreorder`).
+
+- [ ] **Step 4: Gate the dispatch arm + drive the probe counter.** In `m68000drc.cpp`, `generate_native_dispatch` (`:229`). At the top of the function (before the moveq arm) reset the counter; wrap **only** the `btst`-absolute arm (`:242-251`) in `if (drc_native_mem_ea_allowed()) { … }` and increment the counter inside it. The `moveq` arm (`:231-240`) stays unguarded.
+
+Reset at the top of `generate_native_dispatch` (just after the opening brace, `:230`):
+```cpp
+	m_drc_native_mem_ea_arms = 0; // emission probe: counts gated memory-EA arms actually emitted (Task 7)
+```
+Replace the existing committed `btst`-absolute block (`:242-251`):
+```cpp
+	// btst #n,(xxx).W/.L: (m_ird & 0xfffe) == 0x0838
+	{
+		uml::code_label const lbl_not_btst_abs = m_drc_labelnum++;
+		UML_AND(block, I0, I7, 0xfffe);                               // i0 = opword & 0xfffe
+		UML_CMP(block, I0, 0x0838);
+		UML_JMPc(block, COND_NE, lbl_not_btst_abs);                  // not btst-absolute -> next test / delegate
+		generate_btst_imm8_absolute(block, lbl_delegate);           // emit the native opcode (suspend/fault paths JMP lbl_delegate from within)
+		UML_JMP(block, lbl_delegate);                                // fully-granted path: retired -> hand the timing tail to the interpreter
+		UML_LABEL(block, lbl_not_btst_abs);
+	}
+```
+with the gated form:
+```cpp
+	// btst #n,(xxx).W/.L: (m_ird & 0xfffe) == 0x0838 -- native ONLY behind the
+	// space-topology gate (ADR 0007 Addendum 2026-06-28).  When the bound bus
+	// configures AS_OPCODES / user spaces / an MMU, the arm is NOT emitted and
+	// dispatch falls through to lbl_delegate (cfunc_), exactly as before O-mem-1
+	// -- SPACE_PROGRAM would otherwise read the wrong space.
+	if (drc_native_mem_ea_allowed())
+	{
+		uml::code_label const lbl_not_btst_abs = m_drc_labelnum++;
+		UML_AND(block, I0, I7, 0xfffe);                              // i0 = opword & 0xfffe
+		UML_CMP(block, I0, 0x0838);
+		UML_JMPc(block, COND_NE, lbl_not_btst_abs);                 // not btst-absolute -> next test / delegate
+		generate_btst_imm8_absolute(block, lbl_delegate);          // emit the native opcode (suspend/fault paths JMP lbl_delegate from within)
+		UML_JMP(block, lbl_delegate);                               // fully-granted path: retired -> hand the timing tail to the interpreter
+		UML_LABEL(block, lbl_not_btst_abs);
+		m_drc_native_mem_ea_arms++;                                 // emission probe (Task 7)
+	}
+```
+
+> **Leave `is_native_opcode(u16)` unchanged** (`m68000drc.cpp:207-216`). Per the Addendum directive #3 it stays the *topology-independent* opcode-eligibility predicate (`btst`-absolute is eligible); the topology decision is the separate `drc_native_mem_ea_allowed()`. The Task-7 coverage test asserts both facets. **Do not add an `SR_S` runtime branch, a per-read space parameter, or a `read_interruptible` cfunc** (Addendum directive #4 — those belong to later, separately-scoped increments).
+
+> **MMU-attachment safety (note, do not rely on implicitly):** `drc_supported_for_type()` already restricts the DRC to the plain `M68000` (no MMU), so `m_mmu == nullptr` at emit time in every supported config. If a future change lets an MMU attach *after* the block is emitted, `set_current_mmu()` must set `m_cache_dirty = true` so the resident block regenerates and the gate re-evaluates (Addendum §"Enforceable §5 boundary"). Out of scope for O-mem-1; recorded so it is not lost.
+
+- [ ] **Step 5: Qualify the cut-line doc + record OQ-6.** In `src/devices/cpu/m68000/README-drc.md`:
+  - The "Native opcodes shipped" row for `btst #n,(xxx).W` / `.L` (`:193`) — append the gate qualifier:
+```markdown
+| `btst #n,(xxx).W` / `.L` | O-mem-1 | Full native via `generate_bus_step()` — 4-read (.W) / 5-read (.L) interruptible-read sequence with per-bus-cycle charge, suspend checkpoint, and address-error branch; resume after a mid-instruction yield owned by the interpreter's partial handler (ADR 0007 OQ-1). **Native ONLY on a flat-topology, non-MMU bus (`drc_native_mem_ea_allowed()`): when a driver configures `AS_OPCODES` (decrypted opcodes, e.g. FD1094) / user spaces / an MMU the opcode stays `cfunc_` (ADR 0007 Addendum 2026-06-28).** |
+```
+  - In the absolute-modes / bit-ops notes (`:77-86`), add the same gate qualifier where `btst #n,(xxx).W/.L` is called native: "native as of O-mem-1 **on a flat-topology non-MMU bus only**".
+  - Add a "Known limitations" line recording the finding-2 / OQ-6 deferral: "Native memory-EA reads use non-interruptible `UML_READ`, exact only on non-deferring buses (`UML_READ ≡ read_interruptible` on plain RAM/ROM); interruptible/wait-state native reads on deferring-tap buses are deferred to ADR 0007 **OQ-6** (O-mem-2). Within the gate, no in-scope plain-M68000 DRC driver taps the program/data path, so the redo path is gated-by-absence."
+
+- [ ] **Step 6: Build.**
+
+Run (from the worktree root):
+```bash
+MSYSTEM=MINGW64 /c/msys64/usr/bin/bash -lc 'export OS=Windows_NT; cd "$PWD"; mingw32-make REGENIE=1 && mingw32-make TESTS=1 -j32'
+```
+Expected: clean build, no `-Wreorder`/unused warnings.
+
+- [ ] **Step 7: Oracle Leg A + Leg B (x64 + C) — gate is TRUE on the flat oracle bus, so native btst-absolute is still exercised and must stay exact.**
+
+Run:
+```bash
+./mametests "[m68000]"                              # Leg A
+./mametests "[m68000][drc]"                         # Leg B x64
+CPUORACLE_M68_DRC_C=1 ./mametests "[m68000][drc]"   # Leg B C backend
+./mame -validate
+```
+Expected: all green; `-validate` clean. The oracle bus is flat single-program-space (`oracle_m68000_state::m68000_map`, `cpu_test_harness.cpp:757-764`), so `drc_native_mem_ea_allowed()` is **true** there and Leg B exercises the native path exactly as it did pre-gate — the gate must be a no-op on this bus. If Leg B regresses, the gate is mis-evaluating on the flat config (most likely an `m_s_*` pointer-equality surprise) — debug before proceeding.
+
+- [ ] **Step 8: `srcclean` + commit.**
+```bash
+git add src/devices/cpu/m68000/m68000.h src/devices/cpu/m68000/m68000.cpp src/devices/cpu/m68000/m68000drc.cpp src/devices/cpu/m68000/README-drc.md
+git commit -m "fix(m68000drc): compile-time space-topology gate for native btst-absolute (ADR 0007 addendum)"
+```
+
+---
+
+## Task 7: Required gate-predicate unit test (the merge-gate delta)
+
+**Goal:** Prove the gate excludes the topologies finding 1 breaks. Construct started `ORACLE_M68000` devices with (i) a separate `AS_OPCODES` map, (ii) a user-space map, and (iii) an attached MMU, assert `drc_native_mem_ea_allowed()` is **false** and the native `btst` arm is **not emitted** (the probe counter stays `0`); plus the flat-bus positive case (gate **true**, arm emitted). This is cheap — device construction + a block-emission probe, **no corpus run** — and directly tests the fix. It is a **merge prerequisite** for O-mem-1.
+
+**Where it lives.** There is no `tests/emu/cpu/m68000_drc_coverage.cpp` (boundary N has not landed — verified at plan time). The oracle drivers, `GAME(...)` registrations, and the hand-maintained `driver_list::s_drivers_sorted[]` all live in `tests/emu/cpu/cpu_test_harness.cpp`; the test cases live in `tests/emu/cpu/cpuoracle.cpp`. Add the three gate-false driver variants + descriptors to `cpu_test_harness.{cpp,h}` (so they share the existing headless-machine bootstrap) and the new `TEST_CASE` to `cpuoracle.cpp`. No new build file (the test target already compiles both); `make REGENIE=1` is still run for safety.
+
+**Files:**
+- Modify: `tests/emu/cpu/cpu_test_harness.h` — add `oracle_stepper::oracle_native_mem_ea_allowed()` and `oracle_native_arm_emit_count()` (mirroring the existing `oracle_is_drc()` pattern, `:124`); add harness passthroughs `cpu_test_harness::native_mem_ea_allowed()` / `native_arm_emit_count()`; declare three new descriptors `m68000_asopcodes_core_descriptor()` / `m68000_userspace_core_descriptor()` / `m68000_mmu_core_descriptor()`.
+- Modify: `tests/emu/cpu/cpu_test_harness.cpp` — override the two new `oracle_stepper` methods on `oracle_m68000_device` (expose `drc_native_mem_ea_allowed()` and `m_drc_native_mem_ea_arms`); add three driver_device variants + machine configs + `INPUT_PORTS`/`ROM`/`GAME` + `driver_list` entries (re-sorted, count bumped) + descriptors.
+- Modify: `tests/emu/cpu/cpuoracle.cpp` — the new `TEST_CASE`.
+
+**Interfaces:**
+- Consumes: `drc_native_mem_ea_allowed()` and `m_drc_native_mem_ea_arms` (Task 6); `is_native_opcode(0x0838/0x0839)` (committed Task 4).
+
+- [ ] **Step 1: Expose the predicate + probe from the oracle device.** In `cpu_test_harness.h`, beside `oracle_is_drc()` (`:124`):
+```cpp
+	// True iff the live device's space-topology gate (drc_native_mem_ea_allowed())
+	// permits native memory-EA emission.  Overridden by oracle_m68000_device.
+	virtual bool oracle_native_mem_ea_allowed() const { return false; }
+	// # of gated memory-EA dispatch arms emitted in the last resident-block build
+	// (0 => the btst-absolute arm was gated out).  Overridden by oracle_m68000_device.
+	virtual u32 oracle_native_arm_emit_count() const { return 0; }
+```
+In `cpu_test_harness.cpp`, on `oracle_m68000_device` (beside `oracle_is_drc()`, `:582`):
+```cpp
+	virtual bool oracle_native_mem_ea_allowed() const override { return drc_native_mem_ea_allowed(); }
+	virtual u32 oracle_native_arm_emit_count() const override { return m_drc_native_mem_ea_arms; }
+```
+Add the harness passthroughs in `cpu_test_harness.{h,cpp}` (mirror `drc_engaged()`, `:1125`):
+```cpp
+bool cpu_test_harness::native_mem_ea_allowed() const { return m_stepper ? m_stepper->oracle_native_mem_ea_allowed() : false; }
+u32  cpu_test_harness::native_arm_emit_count() const { return m_stepper ? m_stepper->oracle_native_arm_emit_count() : 0; }
+```
+
+- [ ] **Step 2: Add the three gate-false driver variants.** In `cpu_test_harness.cpp`, beside `oracle_m68000_state` (`:733-777`). Each reuses `ORACLE_M68000` and the flat 16 MiB program RAM; the only difference is the extra space / MMU that flips the gate. Maps may share content (distinctness of the `address_space*` is what the predicate tests — distinct *content* is the Task-8 differential oracle's job, not this one).
+
+```cpp
+// (i) separate AS_OPCODES space -> m_s_program != m_s_opcodes -> gate false
+class oracle_m68000_asopcodes_state : public driver_device
+{
+public:
+	oracle_m68000_asopcodes_state(const machine_config &mconfig, device_type type, const char *tag) :
+		driver_device(mconfig, type, tag), m_cpu(*this, "maincpu") { }
+	void machine(machine_config &config) ATTR_COLD;
+	virtual std::vector<std::string> searchpath() const override { return {}; }
+private:
+	void prog_map(address_map &map) ATTR_COLD { map(0x000000, 0xffffff).ram(); }
+	void opc_map (address_map &map) ATTR_COLD { map(0x000000, 0xffffff).ram(); } // distinct space, same shape
+	required_device<oracle_m68000_device> m_cpu;
+};
+void oracle_m68000_asopcodes_state::machine(machine_config &config)
+{
+	ORACLE_M68000(config, m_cpu, 8_MHz_XTAL);
+	m_cpu->set_addrmap(AS_PROGRAM, &oracle_m68000_asopcodes_state::prog_map);
+	m_cpu->set_addrmap(AS_OPCODES, &oracle_m68000_asopcodes_state::opc_map);
+}
+// (ii) user-space map -> m_s_program != m_s_uprogram -> gate false   (AS_USER_PROGRAM)
+//      same shape as above with set_addrmap(AS_USER_PROGRAM, ...).
+// (iii) MMU attached -> m_mmu != nullptr -> gate false: machine() calls
+//       m_cpu->enable_mmu(false)  (assigns m_mmu = &m_mmu_disabled, leaves
+//       m_disable_spaces=false, isolating the m_mmu==nullptr clause).  A second
+//       MMU variant may use enable_mmu(true) to additionally exercise the
+//       !m_disable_spaces clause.
+```
+Each needs an `INPUT_PORTS_START`/`ROM_START`/`GAME(...)` (copy the `oraclem68000` block, `:898-911`) and a `driver_list::s_drivers_sorted[]` entry (`cpuoracle.cpp:1237-1245`) kept **sorted by short name** with `s_driver_count` bumped to match. Each needs a descriptor (reuse `s_m68000_regmap`):
+```cpp
+const cpu_core_descriptor &m68000_asopcodes_core_descriptor()
+{
+	static const cpu_core_descriptor desc = { "m68000_asopcodes", &GAME_NAME(oraclem68kao), s_m68000_regmap };
+	return desc;
+}
+// ...userspace / mmu descriptors likewise.
+```
+
+> **Naming + sort caution:** `s_drivers_sorted[]` uses binary search — the new short names must keep the array sorted (`'_' < lowercase`; pick names like `oraclem68kao`, `oraclem68kus`, `oraclem68kmm` and insert them in the correct sorted position). A mis-sorted array silently fails driver lookup. Re-derive the order when inserting.
+
+- [ ] **Step 3: Write the TEST_CASE.** In `cpuoracle.cpp`, a new case tagged so it runs with the m68000 DRC suite but needs no corpus:
+```cpp
+TEST_CASE("m68000 DRC native memory-EA space-topology gate", "[cpu][m68000][drc][gate]")
+{
+	using namespace cpuoracle;
+
+	// Eligibility predicate is topology-INDEPENDENT (Addendum directive #3).
+	CHECK(m68000_device::is_native_opcode(0x0838)); // btst #n,(xxx).W
+	CHECK(m68000_device::is_native_opcode(0x0839)); // btst #n,(xxx).L
+
+	auto probe = [](const cpu_core_descriptor &desc, bool expect_allowed)
+	{
+		cpu_test_harness h(desc);
+		h.set_drc(true);                 // engage the DRC so the resident block is emitted
+		bool ran = h.run_with_machine([&]
+		{
+			REQUIRE(h.drc_engaged());                       // anti-vacuity: DRC really on
+			CHECK(h.native_mem_ea_allowed() == expect_allowed);
+			h.reset_cpu();
+			h.step_one_instruction(64);                     // force resident-block emission
+			// emission probe: gated-out => 0 arms; flat => the btst-absolute arm emitted
+			CHECK((h.native_arm_emit_count() > 0) == expect_allowed);
+		});
+		REQUIRE(ran);
+	};
+
+	probe(m68000_core_descriptor(),            true);   // flat bus: gate TRUE, arm emitted
+	probe(m68000_asopcodes_core_descriptor(),  false);  // separate AS_OPCODES: gate FALSE
+	probe(m68000_userspace_core_descriptor(),  false);  // AS_USER_PROGRAM: gate FALSE
+	probe(m68000_mmu_core_descriptor(),        false);  // MMU attached: gate FALSE
+}
+```
+
+> **If `step_one_instruction` proves an awkward way to force emission** (e.g. the variant's flat opcode RAM is all zero, decoding a `0x0000` "ori" — harmless, retires), the predicate assertion (`native_mem_ea_allowed()`) is the load-bearing, directly-fix-testing check and is sufficient on its own per the Addendum ("directly tests the fix"); the emit-count probe is the belt-and-suspenders "arm not emitted" half. Keep both if the step retires cleanly; if forcing emission is fiddly, an alternative is to expose a tiny harness hook that calls `code_flush_cache()` once after boot. Builder's call at first build.
+
+- [ ] **Step 4: Build + run the gate test (no corpus needed).**
+```bash
+MSYSTEM=MINGW64 /c/msys64/usr/bin/bash -lc 'export OS=Windows_NT; cd "$PWD"; mingw32-make REGENIE=1 && mingw32-make TESTS=1 -j32'
+./mametests "[m68000][drc][gate]"
+```
+Expected: green — gate `false` + zero arms on all three non-flat configs, gate `true` + ≥1 arm on the flat config.
+
+- [ ] **Step 5: Full local gate + `srcclean` + commit.**
+```bash
+./mametests "[m68000]"
+./mametests "[m68000][drc]"
+CPUORACLE_M68_DRC_C=1 ./mametests "[m68000][drc]"
+./mame -validate
+git add tests/emu/cpu/cpu_test_harness.h tests/emu/cpu/cpu_test_harness.cpp tests/emu/cpu/cpuoracle.cpp
+git commit -m "test(m68000drc): gate-predicate unit test (AS_OPCODES/user-space/MMU => cfunc_, flat => native)"
+```
+
+---
+
+## Task 8: THE SCOPING CALL — AS_OPCODES differential oracle → DEFERRED to O-mem-2 (recorded, not dropped)
+
+**Goal:** Decide whether the AS_OPCODES *differential* oracle (a second Leg-B config with a real separate `AS_OPCODES` space holding **distinct content**, run `-drc 0` vs `-drc 1` — the test that would have caught the original bug) fits O-mem-1 or belongs to O-mem-2, justified from what the harness actually supports. **This task is the decision + the bookkeeping that keeps it from being lost; it ships no production code in O-mem-1.**
+
+### Decision: **(b) record it as O-mem-2's opening task.** It does NOT fit O-mem-1.
+
+**Harness-based justification (read against `cpu_test_harness.cpp` / `cpuoracle.cpp`, 2026-06-28).** The Addendum permits this config "O-mem-1 if the harness allows, else the first task of O-mem-2." The harness does **not** allow it cheaply:
+
+1. **The harness is hard-wired to one flat single-space m68000 driver.** `oracle_m68000_state::m68000_map` is the only m68000 bus and it is `map(0x000000,0xffffff).ram()` on `AS_PROGRAM` alone (`cpu_test_harness.cpp:757-770`); there is no `AS_OPCODES`/user-space map. A differential AS_OPCODES config needs a **new** driver_device + machine config that `set_addrmap(AS_OPCODES, …)` with **content distinct from `AS_PROGRAM`**, a new `GAME(...)` registration, a new hand-sorted `driver_list::s_drivers_sorted[]` entry + `s_driver_count` bump (`cpuoracle.cpp:1237-1245`), and a new core descriptor.
+2. **The harness has no opcode-space content path.** `write_ram`/`read_ram`/`snapshot_retired` hard-code `AS_PROGRAM` (`cpu_test_harness.cpp:1184-1192`, `:469-471`). A differential config must populate `AS_OPCODES` *separately and differently* from `AS_PROGRAM` — new harness plumbing.
+3. **A corpus-semantics design decision is required.** The SingleStepTests corpus is a **flat** memory model (one space; the descriptor comment at `cpuoracle.cpp:1006-1009` notes the flat-RAM assumption is *why* `state_import(M68K_SR)` not calling `update_user_super()` is benign). Splitting that flat corpus into distinct PROGRAM vs OPCODES images — deciding which cells are opcode bytes vs data bytes, and deliberately perturbing an opcode-only cell so a buggy un-gated native prefetch (reading `SPACE_PROGRAM`) **observably** diverges from the interpreter (reading `m_opcodes`) — is non-trivial design, not mechanical plumbing.
+4. **Under the O-mem-1 gate its full value is not yet realizable.** With Task 6's gate in place the native `btst`-absolute arm is **compiled out** on an `AS_OPCODES` bus, so a differential run there would only prove "`cfunc_` ≡ interpreter" (which Leg A/B already cover by construction). The test's *distinctive* value — catching a wrong-space **native** read — is only exercised once O-mem-2 introduces the `AS_OPCODES`-native space-selection path that this oracle must guard. The Addendum says exactly this: native `btst`-absolute on `AS_OPCODES` machines "is a deliberate, recorded **O-mem-2+** extension — deferred precisely because it needs the oracle-harness work above to be gate-validated."
+
+**Contrast with Task 7 (which stays in O-mem-1):** the gate-predicate unit test shares the "new driver variant" cost but needs **no distinct content, no corpus-split design, and no corpus run** — it boots each variant, calls the predicate, and reads the emit-count. That fits O-mem-1; the differential corpus oracle does not.
+
+### Bookkeeping (so it is not lost)
+
+- [ ] **Step 1: Record the O-mem-2 opening task here.** O-mem-2's plan must open with: **"O-mem-2 Task 0 — AS_OPCODES differential oracle."** Build a second m68000 oracle driver with a separate `AS_OPCODES` space whose content differs from `AS_PROGRAM` at a known opcode-fetched cell; add harness opcode-space load/read paths and the corpus PROGRAM/OPCODES split; run Leg B `-drc 0` vs `-drc 1` (corpus-immune) on the x64 + C matrix. This is the prerequisite that gate-validates any O-mem-2 attempt to make memory-EA opcodes native on `AS_OPCODES` machines (lift the gate's `m_s_program == m_s_opcodes` clause). It is also the natural place to add OQ-6's **deferring-tap** oracle config (finding 2) so the redo/wait path is exercised. Until O-mem-2 Task 0 exists, the `AS_OPCODES`-native path stays gated-out and the redo path is **gated-by-absence**.
+
+- [ ] **Step 2: Confirm the ADR already carries the breadcrumb.** ADR 0007 Addendum already logs this as a recorded O-mem-2+ extension (§"Merge-gate implication", §"Consequences delta", and OQ-6). No ADR edit is required from O-mem-1; this plan's Step 1 is the plan-side record. (If O-mem-2 planning has not started, the one-line entry above IS the carried-forward task.)
+
+- [ ] **Step 3: Throughput-benchmark caveat (apply to Task 5 Step 5).** The gate **excludes `AS_OPCODES` (FD1094-class) drivers** from the native path, so the O-mem-1 speedup benchmark must NOT name an FD1094/encrypted Sega System 16/18 set — its `btst`-absolute would run `cfunc_` and show **no** speedup. Measure on a **gate-eligible, flat-topology** 68000 driver (or a decrypted/bootleg set) where `btst`-absolute is hot. The "43% of aurail cycles" figure remains valid as *opcode-selection* justification but does **not** imply a speedup on aurail-under-FD1094. Note this in the PR's benchmark evidence.
+
+---
+
+## Updated merge gate (O-mem-1, post-addendum)
+
+The native-path correctness gate is **unchanged**: the dual-leg flat-RAM oracle (Leg A + Leg B, register/flag/RAM/**cycle**-exact, `-drc 0` vs `-drc 1`) on **x64 (`drcbex64`) + C (`drcbec`)**, authoritative on the **appserver Linux `oracle` CI job** (local Windows green is necessary-not-sufficient). The flat oracle bus satisfies the Task-6 gate, so it certifies native `btst`-absolute for the gated bus class — necessary and sufficient *there*.
+
+Added prerequisites for merge (per the Addendum's merge-gate delta + the user's auto-merge policy):
+1. **Task 7 gate-predicate unit test green** (`[m68000][drc][gate]`) — a **required** merge prerequisite (the flat oracle never exercises the gated-out fallback, so it cannot prove the gate itself).
+2. **`feature-dev:code-reviewer` pre-merge review** clean (no blocking findings; high/medium findings fixed or justifiably deferred).
+3. **Appserver Linux `oracle` job green** = the sufficient correctness gate (NOT preflight — preflight is a tiny-build smoke).
+4. **`mametiny -validate` clean.**
+
+When all gates are green, **merge per the auto-merge policy** (implementation cycle complete, tests + relevant parity gates green, review clean, important issues addressed) — do not stop to ask. The AS_OPCODES differential oracle (Task 8) is **not** a merge prerequisite for O-mem-1; it is O-mem-2 Task 0.
