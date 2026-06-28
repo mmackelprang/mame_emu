@@ -240,6 +240,8 @@ protected:
 	u32                        m_drcoptions;    // configurable DRC options
 	bool                       m_cache_dirty;   // true if we need to (re)generate the resident block
 	bool                       m_isdrc;         // true if we're in DRC mode (latched from allow_drc())
+	u8                         m_drc_redo_scratch; // DRC cold-path landing for access_to_be_redone()
+	u32                        m_drc_native_mem_ea_arms; // # of gated memory-EA dispatch arms emitted in the last generate_native_dispatch (0 => gated out); test/observability only
 	int                        m_drc_labelnum;  // UML label counter for the resident block's code labels
 
 	// Typed constructor
@@ -256,9 +258,14 @@ protected:
 	void static_generate_entry_point(drcuml_block &block);          // the resident block: in-block opcode dispatch
 	void generate_native_dispatch(drcuml_block &block, uml::code_label lbl_delegate); // emit the in-block native-opcode dispatch (I7 = opword)
 	void generate_moveq(drcuml_block &block);   // native UML for moveq #imm,Dn (boundary M's first native opcode; decodes m_ird at runtime)
+	void generate_bus_step(drcuml_block &block, const struct drc_bus_step &step, uml::code_label lbl_delegate); // one native 68000 bus read step (ADR 0007)
+	void generate_btst_imm8_absolute(drcuml_block &block, uml::code_label lbl_delegate); // native btst #n,(xxx).W/.L (O-mem-1)
 	static bool is_native_opcode(u16 opword);   // the predicate identifying opcodes with a native fast-path
 	void func_interpret_quantum();              // run the interpreter for the granted quantum (the cfunc body)
 	static void cfunc_interpret_quantum(void *param);
+	void func_take_access_to_be_redone();       // read-and-clear the redo flag into m_drc_redo_scratch (cold path)
+	static void cfunc_take_access_to_be_redone(void *param);
+	static void cfunc_set_ftu_const(void *param); // native-retire trampoline to set_ftu_const() (single-sourced, not hand-transcribed)
 
 	// True iff this exact device type should use the DRC arm.  Boundary L scopes
 	// the DRC to the plain M68000 only (minimal blast radius); subclasses that
@@ -266,6 +273,15 @@ protected:
 	// subclass that is behaviourally a plain 68000 may override this to opt in.
 	// (Defined out-of-line in m68000.cpp, where the M68000 device type is in scope.)
 	virtual bool drc_supported_for_type() const;
+
+	// True iff the bound bus topology lets a native memory-EA access use
+	// SPACE_PROGRAM for every read with no opcode/user-space distinction and no
+	// MMU translation.  Evaluated at resident-block emit time (post device_start:
+	// the space bindings and m_mmu are fixed by then).  Guards every native
+	// memory-EA dispatch arm (ADR 0007 Addendum 2026-06-28); the register-only
+	// moveq arm is unaffected.  SR_S is deliberately ABSENT -- identical m_s_*
+	// make SPACE_PROGRAM correct in both supervisor and user mode.
+	bool drc_native_mem_ea_allowed() const;
 
 	// allocate a UML code handle if not already allocated (called from both
 	// m68000.cpp and m68000drc.cpp, so it is a non-inline out-of-line static)

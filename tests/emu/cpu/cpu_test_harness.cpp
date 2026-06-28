@@ -581,6 +581,12 @@ public:
 	// m_isdrc is protected in m68000_device -- reachable from this subclass.
 	virtual bool oracle_is_drc() const override { return m_isdrc; }
 
+	// Expose the space-topology gate and emission-probe counter so the
+	// gate-predicate test can assert them without touching protected state directly.
+	// Both members are protected in m68000_device -- reachable from this subclass.
+	virtual bool oracle_native_mem_ea_allowed() const override { return drc_native_mem_ea_allowed(); }
+	virtual uint32_t oracle_native_arm_emit_count() const override { return m_drc_native_mem_ea_arms; }
+
 	// Boundary L scopes the m68000 DRC arm to type()==M68000 only.  This oracle
 	// device IS a plain 68000 (it derives directly from m68000_device with no
 	// behavioural override), so it opts the DRC arm in for its own ORACLE_M68000
@@ -778,6 +784,161 @@ void oracle_m68000_state::machine_reset()
 
 
 //**************************************************************************
+//  M68000 GATE-FALSE FIXTURE DRIVERS  (Task 7)
+//**************************************************************************
+//
+//  Three minimal driver variants that differ from oracle_m68000_state only in
+//  the extra address space / MMU that flips drc_native_mem_ea_allowed() false.
+//  Each shares the same flat 16 MiB program RAM, the same machine_reset() hook
+//  pattern, and the same ORACLE_M68000 device type as the baseline oracle.
+
+// (i) Separate AS_OPCODES space -> m_s_program != m_s_opcodes -> gate false
+class oracle_m68000_asopcodes_state : public driver_device
+{
+public:
+	oracle_m68000_asopcodes_state(const machine_config &mconfig, device_type type, const char *tag) :
+		driver_device(mconfig, type, tag),
+		m_cpu(*this, "maincpu")
+	{
+	}
+
+	void m68000_asopcodes_machine(machine_config &config) ATTR_COLD;
+
+	virtual std::vector<std::string> searchpath() const override { return std::vector<std::string>(); }
+
+protected:
+	virtual void machine_reset() override ATTR_COLD;
+
+private:
+	void prog_map(address_map &map) ATTR_COLD;
+	void opc_map(address_map &map) ATTR_COLD;
+
+	required_device<oracle_m68000_device> m_cpu;
+};
+
+void oracle_m68000_asopcodes_state::prog_map(address_map &map)
+{
+	map(0x000000, 0xffffff).ram();
+}
+
+void oracle_m68000_asopcodes_state::opc_map(address_map &map)
+{
+	// Distinct address space with the same shape -- distinctness of the
+	// address_space* is what the gate predicate tests.
+	map(0x000000, 0xffffff).ram();
+}
+
+void oracle_m68000_asopcodes_state::m68000_asopcodes_machine(machine_config &config)
+{
+	ORACLE_M68000(config, m_cpu, 8_MHz_XTAL);
+	m_cpu->set_addrmap(AS_PROGRAM, &oracle_m68000_asopcodes_state::prog_map);
+	m_cpu->set_addrmap(AS_OPCODES, &oracle_m68000_asopcodes_state::opc_map);
+}
+
+void oracle_m68000_asopcodes_state::machine_reset()
+{
+	if (g_reset_hook)
+		g_reset_hook(machine(), *m_cpu);
+	machine().schedule_exit();
+}
+
+
+// (ii) Separate AS_USER_PROGRAM space -> m_s_program != m_s_uprogram -> gate false
+class oracle_m68000_userspace_state : public driver_device
+{
+public:
+	oracle_m68000_userspace_state(const machine_config &mconfig, device_type type, const char *tag) :
+		driver_device(mconfig, type, tag),
+		m_cpu(*this, "maincpu")
+	{
+	}
+
+	void m68000_userspace_machine(machine_config &config) ATTR_COLD;
+
+	virtual std::vector<std::string> searchpath() const override { return std::vector<std::string>(); }
+
+protected:
+	virtual void machine_reset() override ATTR_COLD;
+
+private:
+	void prog_map(address_map &map) ATTR_COLD;
+	void user_map(address_map &map) ATTR_COLD;
+
+	required_device<oracle_m68000_device> m_cpu;
+};
+
+void oracle_m68000_userspace_state::prog_map(address_map &map)
+{
+	map(0x000000, 0xffffff).ram();
+}
+
+void oracle_m68000_userspace_state::user_map(address_map &map)
+{
+	// Distinct user-program space -- gate checks m_s_program != m_s_uprogram.
+	map(0x000000, 0xffffff).ram();
+}
+
+void oracle_m68000_userspace_state::m68000_userspace_machine(machine_config &config)
+{
+	ORACLE_M68000(config, m_cpu, 8_MHz_XTAL);
+	m_cpu->set_addrmap(AS_PROGRAM, &oracle_m68000_userspace_state::prog_map);
+	m_cpu->set_addrmap(m68000_base_device::AS_USER_PROGRAM, &oracle_m68000_userspace_state::user_map);
+}
+
+void oracle_m68000_userspace_state::machine_reset()
+{
+	if (g_reset_hook)
+		g_reset_hook(machine(), *m_cpu);
+	machine().schedule_exit();
+}
+
+
+// (iii) MMU attached -> m_mmu != nullptr -> gate false
+//       enable_mmu(false) assigns m_mmu = &m_mmu_disabled, leaving
+//       m_disable_spaces=false, isolating the m_mmu==nullptr clause.
+class oracle_m68000_mmu_state : public driver_device
+{
+public:
+	oracle_m68000_mmu_state(const machine_config &mconfig, device_type type, const char *tag) :
+		driver_device(mconfig, type, tag),
+		m_cpu(*this, "maincpu")
+	{
+	}
+
+	void m68000_mmu_machine(machine_config &config) ATTR_COLD;
+
+	virtual std::vector<std::string> searchpath() const override { return std::vector<std::string>(); }
+
+protected:
+	virtual void machine_reset() override ATTR_COLD;
+
+private:
+	void prog_map(address_map &map) ATTR_COLD;
+
+	required_device<oracle_m68000_device> m_cpu;
+};
+
+void oracle_m68000_mmu_state::prog_map(address_map &map)
+{
+	map(0x000000, 0xffffff).ram();
+}
+
+void oracle_m68000_mmu_state::m68000_mmu_machine(machine_config &config)
+{
+	ORACLE_M68000(config, m_cpu, 8_MHz_XTAL);
+	m_cpu->set_addrmap(AS_PROGRAM, &oracle_m68000_mmu_state::prog_map);
+	m_cpu->enable_mmu(false);
+}
+
+void oracle_m68000_mmu_state::machine_reset()
+{
+	if (g_reset_hook)
+		g_reset_hook(machine(), *m_cpu);
+	machine().schedule_exit();
+}
+
+
+//**************************************************************************
 //  MINIMAL OSD
 //**************************************************************************
 
@@ -901,6 +1062,24 @@ INPUT_PORTS_END
 ROM_START( oraclem68000 )
 ROM_END
 
+static INPUT_PORTS_START( oraclem68kao )
+INPUT_PORTS_END
+
+ROM_START( oraclem68kao )
+ROM_END
+
+static INPUT_PORTS_START( oraclem68kus )
+INPUT_PORTS_END
+
+ROM_START( oraclem68kus )
+ROM_END
+
+static INPUT_PORTS_START( oraclem68kmm )
+INPUT_PORTS_END
+
+ROM_START( oraclem68kmm )
+ROM_END
+
 
 //**************************************************************************
 //  GAME DRIVER REGISTRATION (global scope)
@@ -909,6 +1088,9 @@ ROM_END
 GAME( 2026, oraclez80, 0, z80_machine, oraclez80, oracle_z80_state, empty_init, ROT0, "MAME", "CPU Oracle z80 fixture", MACHINE_NO_SOUND | MACHINE_IS_BIOS_ROOT )
 GAME( 2026, oraclem6502, 0, m6502_machine, oraclem6502, oracle_m6502_state, empty_init, ROT0, "MAME", "CPU Oracle m6502 fixture", MACHINE_NO_SOUND | MACHINE_IS_BIOS_ROOT )
 GAME( 2026, oraclem68000, 0, m68000_machine, oraclem68000, oracle_m68000_state, empty_init, ROT0, "MAME", "CPU Oracle m68000 fixture", MACHINE_NO_SOUND | MACHINE_IS_BIOS_ROOT )
+GAME( 2026, oraclem68kao, 0, m68000_asopcodes_machine, oraclem68kao, oracle_m68000_asopcodes_state, empty_init, ROT0, "MAME", "CPU Oracle m68000 AS_OPCODES fixture", MACHINE_NO_SOUND | MACHINE_IS_BIOS_ROOT )
+GAME( 2026, oraclem68kus, 0, m68000_userspace_machine, oraclem68kus, oracle_m68000_userspace_state, empty_init, ROT0, "MAME", "CPU Oracle m68000 AS_USER_PROGRAM fixture", MACHINE_NO_SOUND | MACHINE_IS_BIOS_ROOT )
+GAME( 2026, oraclem68kmm, 0, m68000_mmu_machine, oraclem68kmm, oracle_m68000_mmu_state, empty_init, ROT0, "MAME", "CPU Oracle m68000 MMU fixture", MACHINE_NO_SOUND | MACHINE_IS_BIOS_ROOT )
 
 
 namespace cpuoracle {
@@ -1042,6 +1224,39 @@ const cpu_core_descriptor &m68000_core_descriptor()
 	return desc;
 }
 
+const cpu_core_descriptor &m68000_asopcodes_core_descriptor()
+{
+	static const cpu_core_descriptor desc =
+	{
+		"m68000_asopcodes",
+		&GAME_NAME(oraclem68kao),
+		s_m68000_regmap
+	};
+	return desc;
+}
+
+const cpu_core_descriptor &m68000_userspace_core_descriptor()
+{
+	static const cpu_core_descriptor desc =
+	{
+		"m68000_userspace",
+		&GAME_NAME(oraclem68kus),
+		s_m68000_regmap
+	};
+	return desc;
+}
+
+const cpu_core_descriptor &m68000_mmu_core_descriptor()
+{
+	static const cpu_core_descriptor desc =
+	{
+		"m68000_mmu",
+		&GAME_NAME(oraclem68kmm),
+		s_m68000_regmap
+	};
+	return desc;
+}
+
 
 //**************************************************************************
 //  HARNESS IMPLEMENTATION
@@ -1125,6 +1340,16 @@ void cpu_test_harness::set_drc(bool enable)
 bool cpu_test_harness::drc_engaged() const
 {
 	return m_stepper ? m_stepper->oracle_is_drc() : false;
+}
+
+bool cpu_test_harness::native_mem_ea_allowed() const
+{
+	return m_stepper ? m_stepper->oracle_native_mem_ea_allowed() : false;
+}
+
+uint32_t cpu_test_harness::native_arm_emit_count() const
+{
+	return m_stepper ? m_stepper->oracle_native_arm_emit_count() : 0;
 }
 
 void cpu_test_harness::reset_cpu()
@@ -1232,17 +1457,21 @@ void cpu_test_harness::set_quirk_q(uint8_t q)
 GAME_EXTERN(___empty);
 
 // Must be sorted by short name (driver_list uses binary search): '_' (0x5f)
-// sorts before lowercase letters, and
-// "oraclem6502" < "oraclem68000" < "oraclez80".
+// sorts before lowercase letters.  After "oraclem68000" the next char is '0'
+// (0x30) vs 'k' (0x6b) so oraclem68000 precedes the oraclem68k* group; within
+// that group 'a' < 'm' < 'u' gives ao, mm, us.
 const game_driver * const driver_list::s_drivers_sorted[] =
 {
 	&GAME_NAME(___empty),
 	&GAME_NAME(oraclem6502),
 	&GAME_NAME(oraclem68000),
+	&GAME_NAME(oraclem68kao),
+	&GAME_NAME(oraclem68kmm),
+	&GAME_NAME(oraclem68kus),
 	&GAME_NAME(oraclez80),
 };
 
-std::size_t const driver_list::s_driver_count = 4;
+std::size_t const driver_list::s_driver_count = 7;
 
 // emulator_info stubs -- none of these is exercised by the oracle path, but
 // the symbols must resolve to link the emu library without the frontend.

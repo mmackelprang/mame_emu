@@ -57,6 +57,8 @@ m68000_device::m68000_device(const machine_config &mconfig, device_type type, co
 	  m_drcoptions(0),
 	  m_cache_dirty(true),
 	  m_isdrc(false),
+	  m_drc_redo_scratch(0),
+	  m_drc_native_mem_ea_arms(0),
 	  m_drc_labelnum(1)
 {
 }
@@ -73,6 +75,15 @@ bool m68000_device::drc_supported_for_type() const
 {
 	// Boundary L scopes the DRC arm to the plain M68000 only.
 	return type() == M68000;
+}
+
+bool m68000_device::drc_native_mem_ea_allowed() const
+{
+	return !m_disable_spaces
+		&& (m_mmu == nullptr)            // no MMU / indirect-handler path (ADR 0007 §5)
+		&& (m_s_program == m_s_opcodes)  // no separate AS_OPCODES (decrypted opcodes)
+		&& (m_s_program == m_s_uprogram) // no separate AS_USER_PROGRAM
+		&& (m_s_program == m_s_uopcodes);// no separate AS_USER_OPCODES
 }
 
 void m68000_device::set_current_mmu(mmu *mmu)
@@ -265,6 +276,33 @@ void m68000_device::func_interpret_quantum()
 void m68000_device::cfunc_interpret_quantum(void *param)
 {
 	static_cast<m68000_device *>(param)->func_interpret_quantum();
+}
+
+// The DRC suspend checkpoint queries the interpreter's EXACT access_to_be_redone()
+// read-and-clear semantics from a COLD path (taken only when m_icount<=0 at a bus
+// step -- never on the fully-granted hot path).  The flag is private to cpu_device
+// and the read clears it (std::exchange), so we cannot UML_LOAD it; this cfunc
+// calls the public accessor and parks the boolean in a DRC-owned scratch byte.
+void m68000_device::func_take_access_to_be_redone()
+{
+	m_drc_redo_scratch = access_to_be_redone() ? 1 : 0;
+}
+
+void m68000_device::cfunc_take_access_to_be_redone(void *param)
+{
+	static_cast<m68000_device *>(param)->func_take_access_to_be_redone();
+}
+
+// Native-retire trampoline for the btst-absolute fast-path (O-mem-1).  The
+// interpreter's btst retire calls set_ftu_const(), a 6-way switch on the NEXT
+// opword (m_ird >> 12) that loads m_ftu for the upcoming instruction.  Rather
+// than hand-transcribe that switch into UML (which would duplicate microcode
+// logic that could drift -- violating the single-source rule), the native
+// retire issues one UML_CALLC to this trampoline, which calls the EXACT same
+// set_ftu_const() the interpreter uses.  Runs once per fully-granted btst.
+void m68000_device::cfunc_set_ftu_const(void *param)
+{
+	static_cast<m68000_device *>(param)->set_ftu_const();
 }
 
 // The DRC arm of execute_run().  The dispatch is a SINGLE RESIDENT BLOCK

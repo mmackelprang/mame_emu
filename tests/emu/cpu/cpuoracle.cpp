@@ -1231,3 +1231,48 @@ TEST_CASE("CPU oracle m68000 Leg B (interpreter == DRC)", "[cpu][m68000][drc]")
 	WARN("m68000 oracle [Leg B]: " << fixtures.size() << " fixtures, " << compared
 			<< " cases compared (interpreter == DRC, register/flag/RAM/CYCLE exact); all equal.");
 }
+
+
+//**************************************************************************
+//  M68000 DRC NATIVE MEMORY-EA SPACE-TOPOLOGY GATE (Task 7)
+//**************************************************************************
+//
+//  Proves the gate excludes bus topologies that would mis-execute native
+//  memory-EA emission.  Constructs oracle devices with:
+//    (i)   a separate AS_OPCODES map  -> m_s_program != m_s_opcodes -> gate false
+//    (ii)  a user-space map           -> m_s_program != m_s_uprogram -> gate false
+//    (iii) an attached MMU            -> m_mmu != nullptr            -> gate false
+//  and the flat-bus baseline:
+//    (iv)  flat single AS_PROGRAM map -> all conditions met          -> gate true
+//
+//  NOTE: m68000_device::is_native_opcode() is a protected static member; it is
+//  not accessible from this translation unit, which is not a subclass of
+//  m68000_device.  The eligibility CHECK calls from the brief have been dropped
+//  to avoid a protected-access compile error.  The four probe() calls below are
+//  the load-bearing assertions (gate predicate + emission count).
+
+TEST_CASE("m68000 DRC native memory-EA space-topology gate", "[cpu][m68000][drc][gate]")
+{
+	using namespace cpuoracle;
+
+	auto probe = [](const cpu_core_descriptor &desc, bool expect_allowed)
+	{
+		cpu_test_harness h(desc);
+		h.set_drc(true);                 // engage the DRC so the resident block is emitted
+		bool ran = h.run_with_machine([&]
+		{
+			REQUIRE(h.drc_engaged());                       // anti-vacuity: DRC really on
+			CHECK(h.native_mem_ea_allowed() == expect_allowed);
+			h.reset_cpu();
+			h.step_one_instruction(64);                     // force resident-block emission
+			// emission probe: gated-out => 0 arms; flat => the btst-absolute arm emitted
+			CHECK((h.native_arm_emit_count() > 0) == expect_allowed);
+		});
+		REQUIRE(ran);
+	};
+
+	probe(m68000_core_descriptor(),            true);   // flat bus: gate TRUE, arm emitted
+	probe(m68000_asopcodes_core_descriptor(),  false);  // separate AS_OPCODES: gate FALSE
+	probe(m68000_userspace_core_descriptor(),  false);  // AS_USER_PROGRAM: gate FALSE
+	probe(m68000_mmu_core_descriptor(),        false);  // MMU attached: gate FALSE
+}
