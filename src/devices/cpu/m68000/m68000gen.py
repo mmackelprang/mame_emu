@@ -2417,7 +2417,7 @@ def drc_can_fault(ii):
 # DRC native bus-step kinds (mirror the drc_bus_kind enum emitted in the .ipp).
 DRC_BUS_PREFETCH_READ = 0   # m_opcodes.read_interruptible, SSW_PROGRAM
 DRC_BUS_DATA_READ     = 1   # m_program.read_interruptible, SSW_DATA, byte-lane
-DRC_BUS_DATA_WRITE    = 2   # reserved for O-mem-2+ (write side); unused here
+DRC_BUS_DATA_WRITE    = 2   # m_program.write_interruptible, SSW_DATA, byte-lane
 
 
 def drc_bus_steps(ii):
@@ -2443,7 +2443,15 @@ def drc_bus_steps(ii):
     base = drc_base_mnemonic(ii[2][0])
     src_ea = drc_ea_mode[ii[2][1]]
     dst_ea = drc_ea_mode[ii[2][2]]
-    if base != 'btst' or src_ea != DRC_EA_IMM or dst_ea not in (DRC_EA_ABSW, DRC_EA_ABSL):
+    # O-mem-1: btst #imm8,(xxx).W/.L.  O-mem-2: btst/bchg/bclr/bset with the three
+    # register-indirect data EAs (An)/(An)+/-(An), in BOTH the #imm8 and Dn source
+    # forms (24 forms; btst x6 read-only, bchg/bclr/bset x18 RMW).  Everything else
+    # still returns [] (additive).
+    BITOPS = ('btst', 'bchg', 'bclr', 'bset')
+    REGIND = (DRC_EA_AIND, DRC_EA_AINC, DRC_EA_ADEC)   # (An), (An)+, -(An)
+    is_o1 = (base == 'btst' and src_ea == DRC_EA_IMM and dst_ea in (DRC_EA_ABSW, DRC_EA_ABSL))
+    is_o2 = (base in BITOPS and src_ea in (DRC_EA_IMM, DRC_EA_DREG) and dst_ea in REGIND)
+    if not (is_o1 or is_o2):
         return []
 
     # Re-emit the interpreter handler body exactly as the 'sdf' command does.
@@ -2451,15 +2459,22 @@ def drc_bus_steps(ii):
     lines = [l.strip() for l in generate_source_from_code(code, GEN.direct | GEN.full)]
 
     steps = []
+    pending_pre_charge = 0   # folded '-(An)' predecrement internal -2 (W2/W5)
     i = 0
     n = len(lines)
     while i < n:
         line = lines[i]
-        # A bus read: 'm_edb = m_opcodes.read_interruptible(...)' (prefetch) or
-        # 'm_edb = m_program.read_interruptible(..., <byte-lane mask>)' (data).
-        if line.startswith('m_edb = m_opcodes.read_interruptible') or \
-           line.startswith('m_edb = m_program.read_interruptible'):
-            is_data = line.startswith('m_edb = m_program.read_interruptible')
+        # A bus access: a read ('m_edb = m_opcodes/m_program.read_interruptible(...)')
+        # or a write ('m_program/m_opcodes.write_interruptible(...)').  A write has no
+        # 'm_edb =' prefix and no address-error branch; otherwise the charge + suspend
+        # checkpoint parse is IDENTICAL to a read (ADR 0007 W1).
+        is_read = line.startswith('m_edb = m_opcodes.read_interruptible') or \
+                  line.startswith('m_edb = m_program.read_interruptible')
+        is_write = line.startswith('m_program.write_interruptible') or \
+                   line.startswith('m_opcodes.write_interruptible')
+        if is_read or is_write:
+            # is_data: the data read (m_program byte-lane mask) OR any write (byte-lane).
+            is_data = is_write or line.startswith('m_edb = m_program.read_interruptible')
 
             # The charge is the next 'm_icount -= N;' (skip the optional
             # 'if(!(m_aob & 1)) m_edb >>= 8;' byte-lane select on a data read).
@@ -2471,9 +2486,9 @@ def drc_bus_steps(ii):
                     charge = int(lj[len('m_icount -= '):].rstrip(';'))
                     break
                 j += 1
-            assert charge is not None, "no m_icount charge after read at line %d" % i
+            assert charge is not None, "no m_icount charge after access at line %d" % i
 
-            # The suspend checkpoint follows:
+            # The suspend checkpoint follows (identical for read and write):
             #   if(m_icount <= 0) {
             #       if(access_to_be_redone()) { m_icount += N; m_inst_substate = R; }
             #       else m_inst_substate = C;
@@ -2497,36 +2512,62 @@ def drc_bus_steps(ii):
                         completed_substate = val
                 k += 1
             assert redo_substate is not None and completed_substate is not None, \
-                "could not parse redo/completed substates after read at line %d" % i
+                "could not parse redo/completed substates after access at line %d" % i
+            k += 1  # past the suspend block's 'return;'
 
-            # After the checkpoint's closing '}', a prefetch read has an
-            # 'if(m_aob & 1) { ... m_inst_state = S_ADDRESS_ERROR; ... }' branch;
-            # the data read does not.  Scan forward to the next read or to such a
-            # branch before the next read.
+            # After the checkpoint, a PREFETCH read has an address-error branch
+            #   if(m_aob & 1) { m_icount -= 4; m_inst_state = S_ADDRESS_ERROR; return; }
+            # A data read AND a data write have none (a byte access at an odd EA is
+            # legal, and the write reuses the read-validated EA -- W1).  Detect it and
+            # CONSUME it (advance past its 'return;') so its -4 never leaks to the top
+            # level as a false predecrement charge; otherwise stop before the next access.
             has_addr_error = 0
-            k += 1  # past 'return;'
             scan = k
             while scan < n:
                 ls = lines[scan]
                 if ls.startswith('m_edb = m_opcodes.read_interruptible') or \
-                   ls.startswith('m_edb = m_program.read_interruptible'):
+                   ls.startswith('m_edb = m_program.read_interruptible') or \
+                   ls.startswith('m_program.write_interruptible') or \
+                   ls.startswith('m_opcodes.write_interruptible'):
                     break
                 if ls.startswith('if(m_aob & 1)'):
                     has_addr_error = 1
+                    while scan < n and not lines[scan] == 'return;':
+                        scan += 1
+                    scan += 1  # past the address-error block's 'return;'
                     break
                 scan += 1
 
+            if is_write:
+                kind = DRC_BUS_DATA_WRITE
+            elif is_data:
+                kind = DRC_BUS_DATA_READ
+            else:
+                kind = DRC_BUS_PREFETCH_READ
             steps.append((
-                DRC_BUS_DATA_READ if is_data else DRC_BUS_PREFETCH_READ,
-                DRC_SIZE_B if is_data else DRC_SIZE_W,   # byte data read; word prefetch reads
+                kind,
+                DRC_SIZE_B if is_data else DRC_SIZE_W,   # byte data read/write; word prefetch
                 charge,                                  # the interpreter's -N
                 redo_substate,
                 completed_substate,
-                has_addr_error,
-                1 if is_data else 0,                     # byte-lane select only on the data read
+                has_addr_error,                          # 0 for data read AND data write
+                1 if is_data else 0,                     # byte-lane select on data read AND write
+                pending_pre_charge,                      # folded '-(An)' predecrement -2 (0 otherwise)
             ))
-            i = k
+            pending_pre_charge = 0
+            i = scan if has_addr_error else k
             continue
+
+        # A bare 'm_icount -= N;' reaching the top level is the predecrement micro-
+        # charge (pdcw1 of '-(An)'): no suspend checkpoint, no address-error wrapper
+        # (read/write charges and the addr-error -4 are consumed above).  Attribute it
+        # as pre_charge on the NEXT access step (W2/W5) -- it is charged with NO suspend
+        # checkpoint, exactly as the interpreter's bare 'm_icount -= 2;'.
+        if line.startswith('m_icount -= '):
+            pending_pre_charge += int(line[len('m_icount -= '):].rstrip(';'))
+            i += 1
+            continue
+
         i += 1
     return steps
 
@@ -2747,7 +2788,8 @@ def generate_drcdesc_file(filename, argv_str):
     }
 
     print("", file=out)
-    print("// DRC native bus-step descriptors (O-mem-1: btst-absolute only).", file=out)
+    print("// DRC native bus-step descriptors (O-mem-1 btst-absolute + O-mem-2", file=out)
+    print("// bit-ops (An)/(An)+/-(An), #imm8/Dn source).", file=out)
     print("// Each step's -charge and substate pair are taken from the SAME", file=out)
     print("// microcode walk as the interpreter handler (drc_bus_steps() parses", file=out)
     print("// the very text generate_source_from_code emits for the handler), so", file=out)
@@ -2755,24 +2797,25 @@ def generate_drcdesc_file(filename, argv_str):
     print("enum drc_bus_kind : u8 {", file=out)
     print("\tDRC_BUS_PREFETCH_READ = 0, // m_opcodes.read_interruptible, SSW_PROGRAM", file=out)
     print("\tDRC_BUS_DATA_READ     = 1, // m_program.read_interruptible, SSW_DATA, byte-lane", file=out)
-    print("\tDRC_BUS_DATA_WRITE    = 2  // reserved for O-mem-2+ (write side); unused here", file=out)
+    print("\tDRC_BUS_DATA_WRITE    = 2  // m_program.write_interruptible, SSW_DATA, byte-lane", file=out)
     print("};", file=out)
     print("", file=out)
     print("struct drc_bus_step {", file=out)
     print("\tu8 kind; u8 size; u8 charge;", file=out)
     print("\tu8 redo_substate; u8 completed_substate;", file=out)
-    print("\tu8 has_addr_error; u8 byte_lane;", file=out)
+    print("\tu8 has_addr_error; u8 byte_lane; u8 pre_charge;", file=out)
     print("};", file=out)
     print("struct drc_bus_run { u16 value; u16 mask; u16 first; u16 count; };", file=out)
     print("", file=out)
 
-    # Flat per-step table; the btst-absolute reads are the only rows.  Each row
-    # is commented with its owning opcode so it is auditable against the handler.
+    # Flat per-step table.  Each row is commented with its owning opcode so it is
+    # auditable against the handler.  pre_charge is the '-(An)' predecrement internal
+    # -2 charged (with NO suspend checkpoint) immediately before the access; 0 otherwise.
     print("static inline const drc_bus_step s_drc_bus_step_table[] = {", file=out)
-    for kind, size, charge, redo, completed, addr_err, lane, disp in bus_steps:
-        print("\t{ %-21s, %-12s, %d, %d, %d, %d, %d }, // %s" % (
+    for kind, size, charge, redo, completed, addr_err, lane, pre, disp in bus_steps:
+        print("\t{ %-21s, %-12s, %d, %d, %d, %d, %d, %d }, // %s" % (
             bus_kind_name[kind], drc_size_name[size], charge,
-            redo, completed, addr_err, lane, disp), file=out)
+            redo, completed, addr_err, lane, pre, disp), file=out)
     print("};", file=out)
     print("", file=out)
 
