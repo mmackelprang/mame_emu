@@ -254,6 +254,9 @@ public:
 	// Flat RAM access into the CPU's program space.
 	void write_ram(uint32_t address, uint8_t value);
 	uint8_t read_ram(uint32_t address) const;
+	// Write a byte into AS_OPCODES if the device has a separate opcode space (the
+	// AS_OPCODES differential, Task 0); routes to AS_PROGRAM for flat configs.
+	void write_opcode_ram(uint32_t address, uint8_t value);
 
 	// Flat RAM access into the CPU's I/O space (for IN/OUT instructions): the
 	// fixture's port read values are written here before stepping and port

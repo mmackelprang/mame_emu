@@ -1448,6 +1448,17 @@ void cpu_test_harness::write_ram(uint32_t address, uint8_t value)
 	m_cpu->space(AS_PROGRAM).write_byte(address, value);
 }
 
+void cpu_test_harness::write_opcode_ram(uint32_t address, uint8_t value)
+{
+	// Seed the separate opcode space (AS_OPCODES differential).  When the bound
+	// device has no separate AS_OPCODES, route to AS_PROGRAM so flat configs are
+	// unaffected.
+	if (m_cpu->has_space(AS_OPCODES))
+		m_cpu->space(AS_OPCODES).write_byte(address, value);
+	else
+		m_cpu->space(AS_PROGRAM).write_byte(address, value);
+}
+
 uint8_t cpu_test_harness::read_ram(uint32_t address) const
 {
 	return m_cpu->space(AS_PROGRAM).read_byte(address);
