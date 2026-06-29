@@ -1264,14 +1264,19 @@ TEST_CASE("CPU oracle m68000 Leg B -- separate AS_OPCODES (gate keeps cfunc_)", 
 		return;
 	}
 
-	// the bit-op corpus subset = the opcodes O-mem-2 makes native
-	static const char *const k_bitop_files[] = { "BCHG.json", "BCLR.json", "BSET.json", "BTST.json" };
+	// the native corpus subset = the opcodes O-mem-2 (bit-ops) + O-mem-3a (MOVEA) make
+	// native on a flat-topology bus.  On this separate-AS_OPCODES machine the gate is
+	// FALSE, so all of them must stay cfunc_ and the DRC must match the interpreter.
+	static const char *const k_bitop_files[] = {
+		"BCHG.json", "BCLR.json", "BSET.json", "BTST.json",
+		"MOVEA.w.json", "MOVEA.l.json",   // O-mem-3a: gate must keep MOVEA on cfunc_ here
+	};
 	std::vector<fs::path> fixtures;
 	for (const fs::path &p : all)
 		for (const char *bf : k_bitop_files)
 			if (p.filename().string() == bf)
 				fixtures.push_back(p);
-	REQUIRE_FALSE(fixtures.empty());   // anti-vacuity: the bit-op corpus must be present
+	REQUIRE_FALSE(fixtures.empty());   // anti-vacuity: the native corpus must be present
 
 	struct Obs
 	{
@@ -1529,6 +1534,37 @@ TEST_CASE("m68000 DRC native coverage -- 24 bit-op memory-EA forms", "[cpu][m680
 		CHECK_FALSE(h.is_native_opcode(0x0840));
 		CHECK_FALSE(h.is_native_opcode(0x0868));
 		CHECK_FALSE(h.is_native_opcode(0x0100));
+	});
+	REQUIRE(ran);
+}
+
+// O-mem-3a: assert the 6 MOVEA (An)/(An)+/-(An) -> An word/long forms are classified
+// native by is_native_opcode(), and that the (d16,An) MOVEA forms (deferred to 3e) and
+// the register-source MOVEA forms are NOT (so the predicate did not over-match).
+TEST_CASE("m68000 DRC native coverage -- 6 MOVEA memory-EA forms", "[cpu][m68000][drc][gate]")
+{
+	using namespace cpuoracle;
+	cpu_test_harness h(m68000_core_descriptor());
+	h.set_drc(true);
+	bool ran = h.run_with_machine([&]
+	{
+		REQUIRE(h.drc_engaged());
+		// the 6 O-mem-3a forms -- one representative encoding per form
+		static const std::uint16_t k_native[] = {
+			0x3050, 0x3058, 0x3060,   // movea.w (An)/(An)+/-(An),An
+			0x2050, 0x2058, 0x2060,   // movea.l (An)/(An)+/-(An),An
+		};
+		for (std::uint16_t op : k_native)
+		{
+			INFO("opword " << std::hex << op);
+			CHECK(h.is_native_opcode(op));
+		}
+		// anti-vacuity / no-over-match: (d16,An) MOVEA stays cfunc_ in 3a (it is O-mem-3e),
+		// and the register-source MOVEA forms (movea.w/.l Dn,An and An,An) are never native.
+		CHECK_FALSE(h.is_native_opcode(0x3068));   // movea.w (d16,An),An  -> 3e
+		CHECK_FALSE(h.is_native_opcode(0x2068));   // movea.l (d16,An),An  -> 3e
+		CHECK_FALSE(h.is_native_opcode(0x3040));   // movea.w Dn,An        (register source)
+		CHECK_FALSE(h.is_native_opcode(0x2048));   // movea.l An,An        (register source)
 	});
 	REQUIRE(ran);
 }

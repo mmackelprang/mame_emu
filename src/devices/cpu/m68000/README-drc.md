@@ -86,6 +86,10 @@ insensitive cycle cost and no fault surface in user mode:
   `btst #n,(xxx).W/.L`, native as of O-mem-1, and `btst`/`bchg`/`bclr`/`bset` `#n`\|`Dn`,`(An)`/`(An)+`/`-(An)`,
   native as of O-mem-2 — all **on a flat-topology non-MMU bus only**), `tas`,
   and the `ccr` / `sr` / `usp` operand forms — all `cfunc_` in increment 1.
+- **Memory-EA `MOVE` / `MOVEA`** is `cfunc_` in increment 1 **except MOVEA `(An)`/`(An)+`/`-(An)`→`An`**
+  (`.w`+`.l`, 6 forms), native as of **O-mem-3a** on a flat-topology non-MMU bus
+  (`drc_native_mem_ea_allowed()`). `(d16,An)` MOVEA and all memory-EA `MOVE` (reg↔mem, mem→mem) remain
+  `cfunc_`, deferred to O-mem-3b…3e.
 
 ### Hard `cfunc_` boundaries (never native in increment 1, by category)
 
@@ -194,6 +198,7 @@ This document is updated when the native set changes (each coverage-widening inc
 | `moveq #imm,Dn` | M | CASE 0 native (register/flag write + prefetch-pipe advance); timing tail `cfunc_`'d to the interpreter via the hybrid handoff. |
 | `btst #n,(xxx).W` / `.L` | O-mem-1 | Full native via `generate_bus_step()` — 4-read (.W) / 5-read (.L) interruptible-read sequence with per-bus-cycle charge, suspend checkpoint, and address-error branch; resume after a mid-instruction yield owned by the interpreter's partial handler (ADR 0007 OQ-1). **Native ONLY on a flat-topology, non-MMU bus (`drc_native_mem_ea_allowed()`): when a driver configures `AS_OPCODES` (decrypted opcodes, e.g. FD1094) / user spaces / an MMU the opcode stays `cfunc_` (ADR 0007 Addendum 2026-06-28).** |
 | `btst`/`bchg`/`bclr`/`bset` `#n`\|`Dn`,`(An)`/`(An)+`/`-(An)` | O-mem-2 | 24 forms (`btst`×6 read-only, `bchg`/`bclr`/`bset`×18 RMW). RMW via the **write-side** `generate_bus_step()` (`UML_WRITEM`, byte-lane mask, value from `m_dbout`); `btst` read-only. EA arithmetic with the A7-byte-by-2 rule and the `-(An)` predecrement internal `−2` (single-sourced as the descriptor's `pre_charge`); the bit is modified at the refill-prefetch state but **Z is set from the ORIGINAL byte** before the write. Substates/charges single-sourced from the generator. **Native ONLY on a flat-topology, non-MMU bus (`drc_native_mem_ea_allowed()`)** — `AS_OPCODES`/user-space/MMU machines stay `cfunc_` (ADR 0007 Addendum). The native data-write is validated by the fully-granted Leg-B oracle pass (ADR 0007 W4). |
+| `movea.w`/`movea.l` `(An)`/`(An)+`/`-(An)`,`An` | O-mem-3a | 6 forms. Source-EA read via the frozen `generate_bus_step()` read path (`byte_lane=0` word read, `has_addr_error=1`); **long = two-word read** (high then low) with the high word latched in `m_alue`. Dest is an **address register**: write-back is `ext32(m_dbin)` (`.w`) / `set_16h`+`set_16l` (`.l`) at the final-prefetch state. **No data-write step, no flags, no `generate_bus_step()` edit.** Decodes `rx`/`ry` from `m_irdi` (the emitter latches `m_irdi = m_ird` first so the interpreter's partial handler resumes correctly). The `-(An)` predecrement internal `−2` is single-sourced as the first read's `pre_charge`. **Native ONLY on a flat-topology, non-MMU bus (`drc_native_mem_ea_allowed()`)** — `AS_OPCODES`/user-space/MMU machines stay `cfunc_`. Validated by the 1-cycle (incl. the `m_irdi` resume), full-grant (the native latch + register write-back), and single-offset partial-grant Leg-B passes (ADR 0007 O-mem-3 addendum). `(d16,An)` MOVEA is deferred to O-mem-3e. |
 
 ### Known limitations
 
@@ -218,3 +223,11 @@ This document is updated when the native set changes (each coverage-widening inc
   cannot reach it without overshooting (which would advance into the next instruction). Bounded, low-risk
   (it mirrors the validated boundary-M `moveq` tail and routes `set_ftu_const` through the interpreter's
   own cfunc), logged as a known limitation, not a blocker.
+- **Long-MOVEA read-high→read-low intermediate resume boundary (O-mem-3a, OQ-10 by-construction).** The
+  single-offset (`length-4`) partial-grant pass resumes the long forms at the **final prefetch** — after
+  both word reads have run natively — so the interpreter-side resume *between* read-high and read-low
+  (substate 2→3, where the native must already have latched `m_alue`) is not directly oracle-exercised.
+  It is covered **by construction**: the full-grant pass runs the whole native latch + register write-back
+  end-to-end, the 1-cycle pass exercises the interpreter-side handoff after read-high, and the `m_alue`
+  latch is emitted *before* the read-low bus step (so a completed-suspend at read-low leaves it correct).
+  OQ-10 is owner-decided (2026-06-28): accept this residual — **no parameterized partial-grant sweep**.
