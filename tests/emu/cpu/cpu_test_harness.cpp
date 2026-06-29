@@ -352,6 +352,22 @@ oracle_m6502_device::oracle_m6502_device(const machine_config &mconfig, const ch
 //  `length` (corpus bus-cycle count) -- this identity IS the documented adapter;
 //  no fudge factor is applied.
 
+// Trivial no-op MMU for the OQ-9 regen test.  Attaching it via set_current_mmu()
+// flips drc_native_mem_ea_allowed() false (its only observable effect is m_mmu !=
+// nullptr); translation is never actually exercised by the test.
+class harness_noop_mmu : public m68000_device::mmu
+{
+public:
+	virtual u16 read_program(offs_t, u16) override { return 0; }
+	virtual void write_program(offs_t, u16, u16) override { }
+	virtual u16 read_data(offs_t, u16) override { return 0; }
+	virtual void write_data(offs_t, u16, u16) override { }
+	virtual u16 read_cpu(offs_t, u16) override { return 0; }
+	virtual void set_super(bool) override { }
+	virtual bool translate(int, int, offs_t &, address_space *&) override { return false; }
+};
+static harness_noop_mmu s_harness_noop_mmu;
+
 class oracle_m68000_device : public m68000_device, public cpuoracle::oracle_stepper
 {
 public:
@@ -373,7 +389,26 @@ public:
 	// yields the instruction's true bus-cycle cost == the corpus `length`.
 	int step_instruction(int budget)
 	{
-		(void)budget;
+		// Full-grant Leg-B pass (ADR 0007 W4 / OQ-7): grant the whole instruction's
+		// cycles on the FIRST iteration so a multi-step native opcode runs every bus
+		// step -- including the data WRITE -- natively, then drain at 1.  Selected by
+		// env (alongside CPUORACLE_M68_DRC_C).  When unset, behaviour is the legacy
+		// 1-cycle-per-iteration stepping (validates native step 1 + the suspend handoff).
+		static const bool s_full_grant = (std::getenv("CPUORACLE_M68_DRC_FULLGRANT") != nullptr);
+		// Partial-grant pass (mid-instruction suspend coverage): grant length-4 so a
+		// multi-step native opcode runs all but its LAST bus access, then SUSPENDS one
+		// access before the end and the interpreter resumes from there.  For an RMW
+		// bit-op this suspends at the refill prefetch and resumes at the write step
+		// (bcsm2) in the interpreter -- exercising that the native modify+refill state
+		// left EVERY field the resumed write reads (incl. m_aluo) interpreter-equivalent.
+		// (The full-grant pass only ever suspends at the LAST access; the 1-cycle pass
+		// only at the FIRST -- neither reaches a mid-instruction resume.)
+		static const bool s_part_grant = (std::getenv("CPUORACLE_M68_DRC_PARTGRANT") != nullptr);
+		int first_grant = 1;
+		if(s_full_grant)
+			first_grant = (budget > 0 ? budget : 1);
+		else if(s_part_grant)
+			first_grant = (budget > 4 ? budget - 4 : 1);
 
 		// The over-run carry must start clean so the first grant is not
 		// silently swallowed by a stale m_count_before_instruction_step from a
@@ -428,7 +463,8 @@ public:
 			}
 			else
 				snapshot_retired();
-			*m_icountptr = 1;
+			const int grant = (guard == 0) ? first_grant : 1;
+			*m_icountptr = grant;
 			run();
 			// If this step advanced m_ipc, the core has dispatched the next thing,
 			// so its cycles belong to that, NOT our instruction -- break WITHOUT
@@ -446,7 +482,7 @@ public:
 				m_did_not_retire = false;   // clean retirement
 				break;
 			}
-			consumed += 1 - *m_icountptr;
+			consumed += grant - *m_icountptr;
 		}
 
 		return frozen_consumed >= 0 ? frozen_consumed : consumed;
@@ -586,6 +622,18 @@ public:
 	// Both members are protected in m68000_device -- reachable from this subclass.
 	virtual bool oracle_native_mem_ea_allowed() const override { return drc_native_mem_ea_allowed(); }
 	virtual uint32_t oracle_native_arm_emit_count() const override { return m_drc_native_mem_ea_arms; }
+
+	// OQ-9: attach/detach a stub MMU at runtime via set_current_mmu() (public on
+	// m68000_device).  The fix under test sets m_cache_dirty so the resident block
+	// regenerates and drc_native_mem_ea_allowed() re-evaluates on the next build.
+	virtual void oracle_set_test_mmu(bool attach) override
+	{
+		set_current_mmu(attach ? &s_harness_noop_mmu : nullptr);
+	}
+
+	// is_native_opcode is a protected static of m68000_device -- reachable from this
+	// subclass.  Exposes the native-dispatch predicate to the coverage assertion.
+	virtual bool oracle_is_native_opcode(uint16_t opword) const override { return is_native_opcode(opword); }
 
 	// Boundary L scopes the m68000 DRC arm to type()==M68000 only.  This oracle
 	// device IS a plain 68000 (it derives directly from m68000_device with no
@@ -1352,6 +1400,17 @@ uint32_t cpu_test_harness::native_arm_emit_count() const
 	return m_stepper ? m_stepper->oracle_native_arm_emit_count() : 0;
 }
 
+void cpu_test_harness::set_test_mmu(bool attach)
+{
+	if(m_stepper)
+		m_stepper->oracle_set_test_mmu(attach);
+}
+
+bool cpu_test_harness::is_native_opcode(uint16_t opword) const
+{
+	return m_stepper ? m_stepper->oracle_is_native_opcode(opword) : false;
+}
+
 void cpu_test_harness::reset_cpu()
 {
 	// reset the device subtree directly so we land on an instruction boundary
@@ -1409,6 +1468,17 @@ bool cpu_test_harness::did_not_retire() const
 void cpu_test_harness::write_ram(uint32_t address, uint8_t value)
 {
 	m_cpu->space(AS_PROGRAM).write_byte(address, value);
+}
+
+void cpu_test_harness::write_opcode_ram(uint32_t address, uint8_t value)
+{
+	// Seed the separate opcode space (AS_OPCODES differential).  When the bound
+	// device has no separate AS_OPCODES, route to AS_PROGRAM so flat configs are
+	// unaffected.
+	if (m_cpu->has_space(AS_OPCODES))
+		m_cpu->space(AS_OPCODES).write_byte(address, value);
+	else
+		m_cpu->space(AS_PROGRAM).write_byte(address, value);
 }
 
 uint8_t cpu_test_harness::read_ram(uint32_t address) const

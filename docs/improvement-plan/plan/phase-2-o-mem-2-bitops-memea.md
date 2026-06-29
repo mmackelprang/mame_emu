@@ -139,9 +139,9 @@ No new `.cpp`/`.h` file is created (all emitters live in the existing `m68000drc
 > - **NOT `length + headroom`.** Overshoot makes the final access find `m_icount > 0`, so the native retire runs, then the block JMPs to `cfunc_interpret_quantum` which runs the *next* instruction's prefetch, advancing `m_ipc`/`m_pc`/`m_au` before `run()` returns — the harness can no longer snapshot instruction-1's retired state. `length` is the exact sweet spot.
 > - **`SR.T` handled for free.** The native phase stops at `m_icount == 0` before retire, never reaching the post-retire `S_TRACE` set; the retire+trace run in the 1-cycle drain under the unchanged `m_inst_state == S_TRACE` freeze (`:424-430`). No special handling.
 
-- [ ] **Step 1: Read the stepper and confirm `budget` is `length`.** Read `cpu_test_harness.cpp:374-453` (`oracle_m68000_device::step_instruction`) and the call site `cpuoracle.cpp:1102` (`harness.step_one_instruction(expected_cycles)` where `expected_cycles = test["length"]`). Confirm `budget` carries `length` end-to-end (`oracle_step(int budget)` `:511` → `step_instruction(budget)`), and that today it is discarded at `:376` (`(void)budget;`).
+- [x] **Step 1: Read the stepper and confirm `budget` is `length`.** Read `cpu_test_harness.cpp:374-453` (`oracle_m68000_device::step_instruction`) and the call site `cpuoracle.cpp:1102` (`harness.step_one_instruction(expected_cycles)` where `expected_cycles = test["length"]`). Confirm `budget` carries `length` end-to-end (`oracle_step(int budget)` `:511` → `step_instruction(budget)`), and that today it is discarded at `:376` (`(void)budget;`).
 
-- [ ] **Step 2: Add the env toggle + first-grant sizing.** In `oracle_m68000_device::step_instruction`, replace the `(void)budget;` discard and the in-loop `*m_icountptr = 1;` / `consumed += 1 - *m_icountptr;` with a full-grant-aware version. Read the env flag once.
+- [x] **Step 2: Add the env toggle + first-grant sizing.** In `oracle_m68000_device::step_instruction`, replace the `(void)budget;` discard and the in-loop `*m_icountptr = 1;` / `consumed += 1 - *m_icountptr;` with a full-grant-aware version. Read the env flag once.
 
 Replace `(void)budget;` (`:376`) with:
 ```cpp
@@ -166,27 +166,27 @@ Replace the accumulation `consumed += 1 - *m_icountptr;` (`:449`) with:
 
 > **Note:** `<cstdlib>` must be included for `std::getenv` — confirm it is already pulled in (the C-backend toggle uses the same header pattern; grep `CPUORACLE_M68_DRC_C` in `cpuoracle.cpp` / harness). If not, add `#include <cstdlib>` at the top of `cpu_test_harness.cpp`. Read the env once into a `static const` so the corpus loop pays no per-case cost.
 
-- [ ] **Step 3: Build.**
+- [x] **Step 3: Build.**
 ```bash
 MSYSTEM=MINGW64 /c/msys64/usr/bin/bash -lc 'export OS=Windows_NT; cd "$PWD"; mingw32-make REGENIE=1 && mingw32-make TESTS=1 -j32'
 ```
 Expected: clean build.
 
-- [ ] **Step 4: Legacy pass unchanged (regression guard).**
+- [x] **Step 4: Legacy pass unchanged (regression guard).**
 ```bash
 ./mametests "[m68000]"            # Leg A
 ./mametests "[m68000][drc]"       # Leg B, legacy 1-cycle (env unset) -- must be IDENTICAL to pre-change
 ```
 Expected: both green. With the env unset, `first_grant == 1` and `grant == 1` always, so this is byte-equivalent to the old stepper.
 
-- [ ] **Step 5: Full-grant pass against the EXISTING native `btst`-absolute (the baseline).**
+- [x] **Step 5: Full-grant pass against the EXISTING native `btst`-absolute (the baseline).**
 ```bash
 CPUORACLE_M68_DRC_FULLGRANT=1 ./mametests "[m68000][drc]"                       # x64
 CPUORACLE_M68_DRC_FULLGRANT=1 CPUORACLE_M68_DRC_C=1 ./mametests "[m68000][drc]" # C backend
 ```
 Expected: **green.** This is the first correctness-gate coverage of O-mem-1's native tail (reads 2–5, byte-lane data read, `compute_z`, the full 4-/5-read sequence run native in one pass). **If it fails:** O-mem-1's tail has a latent bug the 1-cycle pass never reached — use `superpowers:systematic-debugging`; the failure names register/flag/RAM/cycle and the case. Fix it **in this PR** (it is the same mechanism family). Do not proceed to Task 0 until both backends are green here — a clean baseline makes a later write-path failure unambiguous.
 
-- [ ] **Step 6: `srcclean` + commit.**
+- [x] **Step 6: `srcclean` + commit.**
 ```bash
 git add tests/emu/cpu/cpu_test_harness.cpp
 git commit -m "test(m68000drc): add fully-granted Leg-B oracle pass (ADR 0007 W4); baselines O-mem-1 native tail"
@@ -208,9 +208,9 @@ git commit -m "test(m68000drc): add fully-granted Leg-B oracle pass (ADR 0007 W4
 **Interfaces:**
 - Consumes: the corpus, `drc_native_mem_ea_allowed()` (false on this topology by construction), the fully-granted pass from Task 0a (run this differential under both stepping modes).
 
-- [ ] **Step 1: Read the existing AS_OPCODES gate variant + the harness RAM paths.** Read `cpu_test_harness.cpp:790-840` (`oracle_m68000_asopcodes_state`, `prog_map`/`opc_map`) and the RAM I/O paths `write_ram`/`read_ram`/`snapshot_retired` (`:462-475`, `:1184-1192` — they hard-code `AS_PROGRAM`). The differential config needs `AS_OPCODES` to resolve to a **separate** `address_space` whose RAM is loaded *separately* from `AS_PROGRAM`.
+- [x] **Step 1: Read the existing AS_OPCODES gate variant + the harness RAM paths.** Read `cpu_test_harness.cpp:790-840` (`oracle_m68000_asopcodes_state`, `prog_map`/`opc_map`) and the RAM I/O paths `write_ram`/`read_ram`/`snapshot_retired` (`:462-475`, `:1184-1192` — they hard-code `AS_PROGRAM`). The differential config needs `AS_OPCODES` to resolve to a **separate** `address_space` whose RAM is loaded *separately* from `AS_PROGRAM`.
 
-- [ ] **Step 2: Add the distinct-content AS_OPCODES driver variant.** In `cpu_test_harness.cpp`, beside the existing `oracle_m68000_asopcodes_state`:
+- [x] **Step 2: Add the distinct-content AS_OPCODES driver variant.** In `cpu_test_harness.cpp`, beside the existing `oracle_m68000_asopcodes_state`:
 ```cpp
 // Differential AS_OPCODES variant (O-mem-2 Task 0): AS_OPCODES is a SEPARATE
 // space with its OWN 16 MiB RAM, loaded with the corpus opcode bytes; AS_PROGRAM
@@ -246,14 +246,14 @@ const cpu_core_descriptor &m68000_asopcodes_diff_core_descriptor()
 }
 ```
 
-- [ ] **Step 3: Add the opcode-space load path.** The differential test must seed `AS_OPCODES` independently of `AS_PROGRAM`. Add a harness method that writes a byte to `AS_OPCODES` (mirroring `write_ram`'s `AS_PROGRAM` path but with `space(AS_OPCODES)`), exposed only on the differential stepper:
+- [x] **Step 3: Add the opcode-space load path.** The differential test must seed `AS_OPCODES` independently of `AS_PROGRAM`. Add a harness method that writes a byte to `AS_OPCODES` (mirroring `write_ram`'s `AS_PROGRAM` path but with `space(AS_OPCODES)`), exposed only on the differential stepper:
 ```cpp
 // In oracle_m68000_device (cpu_test_harness.cpp), beside the AS_PROGRAM write_ram path:
 void write_opcode_ram(u32 addr, u8 val) { space(AS_OPCODES).write_byte(addr, val); }
 ```
 Add a virtual on `oracle_stepper` (default no-op) + a `cpu_test_harness::write_opcode_ram(addr,val)` passthrough in `cpu_test_harness.{h,cpp}`, mirroring `write_ram`. When the bound device has no separate `AS_OPCODES`, the call routes (via fallback) to `AS_PROGRAM` — harmless for the flat configs.
 
-- [ ] **Step 4: Write the differential `TEST_CASE`.** In `cpuoracle.cpp`, a case that loads the corpus instruction stream into `AS_OPCODES` (opcode bytes) and the data into `AS_PROGRAM`, runs the same `run_one_case` comparison `-drc 0` vs `-drc 1`, and asserts equality. The PROGRAM/OPCODES split: opcode/prefetch addresses (the instruction stream the corpus places at the PC and the bit-op extension words) load into `AS_OPCODES`; the data EA cells load into both (or perturb the opcode-only cells so an un-gated native prefetch would diverge). Tag `[cpu][m68000][drc][asopcodes]`.
+- [x] **Step 4: Write the differential `TEST_CASE`.** In `cpuoracle.cpp`, a case that loads the corpus instruction stream into `AS_OPCODES` (opcode bytes) and the data into `AS_PROGRAM`, runs the same `run_one_case` comparison `-drc 0` vs `-drc 1`, and asserts equality. The PROGRAM/OPCODES split: opcode/prefetch addresses (the instruction stream the corpus places at the PC and the bit-op extension words) load into `AS_OPCODES`; the data EA cells load into both (or perturb the opcode-only cells so an un-gated native prefetch would diverge). Tag `[cpu][m68000][drc][asopcodes]`.
 ```cpp
 TEST_CASE("CPU oracle m68000 Leg B -- separate AS_OPCODES (gate keeps cfunc_)", "[cpu][m68000][drc][asopcodes]")
 {
@@ -270,7 +270,7 @@ TEST_CASE("CPU oracle m68000 Leg B -- separate AS_OPCODES (gate keeps cfunc_)", 
 
 > **Design note (carried from O-mem-1 Task 8):** deciding which corpus cells are opcode bytes vs data bytes — and perturbing an opcode-only cell so a buggy un-gated native prefetch would *observably* diverge — is the non-trivial part. Keep it minimal: the corpus's PC-region words (the instruction + its extension words) are opcode-space; everything the EA touches is data-space. Document the split inline. If the corpus's flat model makes a clean split impractical for some cases, it is acceptable to restrict this differential to the bit-op corpus subset (the opcodes O-mem-2 makes native) — that is the set whose native path the gate must guard.
 
-- [ ] **Step 5: Build + run (both stepping modes, both backends).**
+- [x] **Step 5: Build + run (both stepping modes, both backends).**
 ```bash
 MSYSTEM=MINGW64 /c/msys64/usr/bin/bash -lc 'export OS=Windows_NT; cd "$PWD"; mingw32-make REGENIE=1 && mingw32-make TESTS=1 -j32'
 ./mametests "[m68000][drc][asopcodes]"
@@ -279,7 +279,7 @@ CPUORACLE_M68_DRC_FULLGRANT=1 ./mametests "[m68000][drc][asopcodes]"
 ```
 Expected: green — gate off (anti-vacuity), interpreter ≡ DRC on the AS_OPCODES topology.
 
-- [ ] **Step 6: `srcclean` + commit.**
+- [x] **Step 6: `srcclean` + commit.**
 ```bash
 git add tests/emu/cpu/cpu_test_harness.h tests/emu/cpu/cpu_test_harness.cpp tests/emu/cpu/cpuoracle.cpp
 git commit -m "test(m68000drc): AS_OPCODES differential oracle (gate keeps cfunc_; distinct opcode-space content)"
@@ -299,7 +299,7 @@ git commit -m "test(m68000drc): AS_OPCODES differential oracle (gate keeps cfunc
 **Interfaces:**
 - Produces (consumed by Tasks 2–4): bus runs for all 24 `{value, mask}` patterns; the flat step table gains `DATA_WRITE` rows (kind 2) and a predecrement representation. The chosen predecrement model is a **`pre_charge` field on the data-read step** (W5's first option): `struct drc_bus_step` gains a trailing `u8 pre_charge;` (cycles charged with **no** suspend checkpoint immediately before the access — 2 for `-(An)`, 0 otherwise). This keeps the run a clean per-bus-access sequence; the emitter charges `pre_charge` before issuing the access.
 
-- [ ] **Step 1: Verify the round-trip is additive-clean (baseline).** Regenerate all outputs and confirm an empty diff (from `src/devices/cpu/m68000/`):
+- [x] **Step 1: Verify the round-trip is additive-clean (baseline).** Regenerate all outputs and confirm an empty diff (from `src/devices/cpu/m68000/`):
 ```bash
 python m68000gen.py decode m68000.lst m68000-decode.cpp
 python m68000gen.py header m68000.lst m68000-head.h
@@ -312,9 +312,9 @@ git diff --stat
 ```
 Expected: empty. If `m68000-drcdesc.ipp` differs, the tree is stale or Python differs — resolve before editing.
 
-- [ ] **Step 2: Pin the 24 handlers' bus-step truth.** Read each family's three EA handlers (`btst`/`bchg`/`bclr`/`bset` × `ais`/`aips`/`pais`, `#imm8` and `dd`). Record per step: the `m_icount -= N` charge(s) (note the `−2` at `pdcw1` for `pais`, which has **no** suspend checkpoint), the redo/completed substate pair, whether an `if(m_aob & 1)` branch follows (prefetch reads only), and the write line `m_program.write_interruptible(m_aob & ~1, m_dbout, (m_aob&1)?0x00ff:0xff00)` (the write step — DATA, byte-lane, **no** addr-error). This is the table in the plan header; the generator must emit *these exact numbers*.
+- [x] **Step 2: Pin the 24 handlers' bus-step truth.** Read each family's three EA handlers (`btst`/`bchg`/`bclr`/`bset` × `ais`/`aips`/`pais`, `#imm8` and `dd`). Record per step: the `m_icount -= N` charge(s) (note the `−2` at `pdcw1` for `pais`, which has **no** suspend checkpoint), the redo/completed substate pair, whether an `if(m_aob & 1)` branch follows (prefetch reads only), and the write line `m_program.write_interruptible(m_aob & ~1, m_dbout, (m_aob&1)?0x00ff:0xff00)` (the write step — DATA, byte-lane, **no** addr-error). This is the table in the plan header; the generator must emit *these exact numbers*.
 
-- [ ] **Step 3: Add the `pre_charge` field to `drc_bus_step`.** In `generate_drcdesc_file` (`:2761`), extend the struct and the row format:
+- [x] **Step 3: Add the `pre_charge` field to `drc_bus_step`.** In `generate_drcdesc_file` (`:2761`), extend the struct and the row format:
 ```python
     print("struct drc_bus_step {", file=out)
     print("\tu8 kind; u8 size; u8 charge;", file=out)
@@ -331,7 +331,7 @@ and the per-row print (`:2772-2775`) gains the trailing field:
 ```
 (The flat-table append at `collect_bus_run` `:2724-2725` must carry the extra tuple element — see Step 5.)
 
-- [ ] **Step 4: Widen `drc_bus_steps()` to the 24 forms + parse writes and the `−2`.** In `m68000gen.py`, replace the O-mem-1 opcode filter (`:2443-2447`) and extend the parser (`:2456-2531`):
+- [x] **Step 4: Widen `drc_bus_steps()` to the 24 forms + parse writes and the `−2`.** In `m68000gen.py`, replace the O-mem-1 opcode filter (`:2443-2447`) and extend the parser (`:2456-2531`):
 ```python
     base = drc_base_mnemonic(ii[2][0])
     src_ea = drc_ea_mode[ii[2][1]]
@@ -378,9 +378,9 @@ Initialize `pending_pre_charge = 0` before the loop; on each **read** step, appe
 
 > **Single-source discipline (R-A):** do **not** special-case substate numbers by opcode. The parser reads them from the handler text. The only O-mem-2-specific logic is recognizing the `write_interruptible` line and the bare predecrement `−2`. The 24 forms then fall out of the existing per-opcode iteration (`:2728`) for free, because the opcode filter now admits them.
 
-- [ ] **Step 5: Thread `pre_charge` through the flat-table build.** In `collect_bus_run` (`:2721-2726`) the tuple `st` now has 8 elements (incl. `pre_charge`); `bus_steps.append(st + (disp,))` makes 9. Update the unpack in the row-print loop (Step 3) to 9 fields. Update the `s_drc_bus_step_table[]` comment (`:2750`, `:2769`) from "btst-absolute only" to "btst-absolute (O-mem-1) + bit-ops (An)/(An)+/-(An) #imm8/Dn (O-mem-2)". Update the `DRC_BUS_DATA_WRITE` enum comment (`:2758`, `:2420`, `m68000-drcdesc.ipp` enum) from "reserved/unused" to "m_program.write_interruptible, SSW_DATA, byte-lane".
+- [x] **Step 5: Thread `pre_charge` through the flat-table build.** In `collect_bus_run` (`:2721-2726`) the tuple `st` now has 8 elements (incl. `pre_charge`); `bus_steps.append(st + (disp,))` makes 9. Update the unpack in the row-print loop (Step 3) to 9 fields. Update the `s_drc_bus_step_table[]` comment (`:2750`, `:2769`) from "btst-absolute only" to "btst-absolute (O-mem-1) + bit-ops (An)/(An)+/-(An) #imm8/Dn (O-mem-2)". Update the `DRC_BUS_DATA_WRITE` enum comment (`:2758`, `:2420`, `m68000-drcdesc.ipp` enum) from "reserved/unused" to "m_program.write_interruptible, SSW_DATA, byte-lane".
 
-- [ ] **Step 6: Regenerate and prove additivity.**
+- [x] **Step 6: Regenerate and prove additivity.**
 ```bash
 python m68000gen.py decode m68000.lst m68000-decode.cpp
 python m68000gen.py header m68000.lst m68000-head.h
@@ -393,7 +393,7 @@ git diff --stat
 ```
 Expected: **only** `m68000-drcdesc.ipp` appears. The `drc_bus_step` struct gained a field and the new bit-op runs/rows appended; the O-mem-1 btst-absolute rows must be **byte-identical except** the new trailing `, 0` `pre_charge` column (and the struct line). If any of `m68000-decode.cpp`/`m68000-head.h`/the four `s*` files changed, the edit leaked into the wrong code path — fix before continuing.
 
-- [ ] **Step 7: Eyeball the emitted rows against the handlers (R-A — catch it here, not in Leg B).** Confirm `m68000-drcdesc.ipp` now has runs for all 24 `{value, mask}` with the right counts and substates:
+- [x] **Step 7: Eyeball the emitted rows against the handlers (R-A — catch it here, not in Leg B).** Confirm `m68000-drcdesc.ipp` now has runs for all 24 `{value, mask}` with the right counts and substates:
 ```bash
 grep -nE '0x0850, 0xfff8|0x0858, 0xfff8|0x0860, 0xfff8' m68000-drcdesc.ipp   # bchg #imm8 (An)/(An)+/-(An): count 4 each
 grep -nE '0x0150, 0xf1f8|0x0158, 0xf1f8|0x0160, 0xf1f8' m68000-drcdesc.ipp   # bchg Dn ...: count 3 each
@@ -402,7 +402,7 @@ grep -n 'DRC_BUS_DATA_WRITE' m68000-drcdesc.ipp                              # t
 ```
 Verify each write row has `has_addr_error == 0, byte_lane == 1`, the right `completed_substate` (8 for `#imm8` RMW, 6 for `Dn` RMW), and that the `-(An)` data-read row carries `pre_charge == 2` while `(An)`/`(An)+` carry `0`. A mismatch is the single highest-risk bug in the batch.
 
-- [ ] **Step 8: Build + Leg A (descriptor inert until the emitter consumes it) + validate.**
+- [x] **Step 8: Build + Leg A (descriptor inert until the emitter consumes it) + validate.**
 ```bash
 MSYSTEM=MINGW64 /c/msys64/usr/bin/bash -lc 'export OS=Windows_NT; cd "$PWD"; mingw32-make REGENIE=1 && mingw32-make TESTS=1 -j32'
 ./mametests "[m68000]"
@@ -410,7 +410,7 @@ MSYSTEM=MINGW64 /c/msys64/usr/bin/bash -lc 'export OS=Windows_NT; cd "$PWD"; min
 ```
 Expected: build clean; Leg A green (the new rows are not yet read by any emitter, and `generate_bus_step`/`generate_btst_imm8_absolute` ignore the new `pre_charge`/write rows — confirm the existing btst-absolute Leg B still green: `./mametests "[m68000][drc]"`).
 
-- [ ] **Step 9: `srcclean` + commit.**
+- [x] **Step 9: `srcclean` + commit.**
 ```bash
 git add src/devices/cpu/m68000/m68000gen.py src/devices/cpu/m68000/m68000-drcdesc.ipp
 git commit -m "feat(m68000drc): generate DATA_WRITE + predecrement bus-step rows for bit-ops (An)/(An)+/-(An) (additive)"
@@ -429,7 +429,7 @@ git commit -m "feat(m68000drc): generate DATA_WRITE + predecrement bus-step rows
 - Consumes: `struct drc_bus_step` (now with `kind`, `pre_charge`), `DRC_BUS_DATA_WRITE`; `m_dbout` (u16); `m_drc_redo_scratch`, `cfunc_take_access_to_be_redone`.
 - Produces (consumed by Task 3): the same `generate_bus_step(block, step, lbl_delegate)` signature, now handling writes. Contract unchanged for reads. For a write: the *caller* has already set `m_aob`, `m_dbout` (`set_8xl`'d), and `m_base_ssw = SSW_DATA`; the primitive charges `pre_charge` (if any) then issues `UML_WRITEM`, charges `−N`, runs the shared suspend checkpoint, and on the clean path falls through (no addr-error, no `m_edb` commit). Clobbers I0-I6; preserves I7.
 
-- [ ] **Step 1: Add the `pre_charge` charge + the kind switch.** In `generate_bus_step` (`:361`), before the read (`:367`), charge `pre_charge` with no checkpoint (the predecrement `−2`):
+- [x] **Step 1: Add the `pre_charge` charge + the kind switch.** In `generate_bus_step` (`:361`), before the read (`:367`), charge `pre_charge` with no checkpoint (the predecrement `−2`):
 ```cpp
 	// predecrement internal micro-charge (-(An)): charged with NO suspend
 	// checkpoint, exactly as the interpreter's pdcw1 'm_icount -= 2;' (W2/W5).
@@ -484,13 +484,13 @@ Leave the charge + suspend checkpoint (`:394-417`) **unchanged** — it is share
 
 > **Verify before building:** `m_dbout` is `u16` (`m68000.h:197`) → `SIZE_WORD`. `UML_WRITEM(block, addr, src, mask, size, space)` is `drcumlsh.h:67`. The mask is a UML register (`I4`), matching the interpreter's runtime `(m_aob & 1) ? 0x00ff : 0xff00`. `SPACE_PROGRAM` is correct only behind the gate (W6) — the dispatch arm wrapper (Task 4) provides it.
 
-- [ ] **Step 2: Build (compile-only — no write step is dispatched yet).**
+- [x] **Step 2: Build (compile-only — no write step is dispatched yet).**
 ```bash
 MSYSTEM=MINGW64 /c/msys64/usr/bin/bash -lc 'export OS=Windows_NT; cd "$PWD"; mingw32-make REGENIE=1 && mingw32-make TESTS=1 -j32'
 ```
 Expected: clean build. The write branch is dead until Task 4 wires a write-bearing opcode.
 
-- [ ] **Step 3: Oracle unchanged — btst-absolute (read-only) still exact, both passes.**
+- [x] **Step 3: Oracle unchanged — btst-absolute (read-only) still exact, both passes.**
 ```bash
 ./mametests "[m68000][drc]"
 CPUORACLE_M68_DRC_FULLGRANT=1 ./mametests "[m68000][drc]"
@@ -498,7 +498,7 @@ CPUORACLE_M68_DRC_C=1 ./mametests "[m68000][drc]"
 ```
 Expected: green. btst-absolute uses no `DATA_WRITE` step and `pre_charge == 0`, so the new branch/charge are inert — Leg B is byte-identical to Task 0a's baseline. (This proves the refactor did not perturb the read path.)
 
-- [ ] **Step 4: `srcclean` + commit.**
+- [x] **Step 4: `srcclean` + commit.**
 ```bash
 git add src/devices/cpu/m68000/m68000drc.cpp
 git commit -m "feat(m68000drc): generate_bus_step() DATA_WRITE branch (UML_WRITEM + lane mask + predecrement pre_charge)"
@@ -518,7 +518,7 @@ git commit -m "feat(m68000drc): generate_bus_step() DATA_WRITE branch (UML_WRITE
 - Consumes: `generate_bus_step` (Task 2), `s_drc_bus_run_table`/`s_drc_bus_step_table` (Task 1), `set_8xl` semantics, `m_da[]`/`m_sp`/`m_dcr`/`m_alub`/`m_dbout`/`m_at`/`m_au` fields, `cfunc_set_ftu_const` (`:268`).
 - Produces (consumed by Task 4): `void generate_bitop_mem(drcuml_block &, const bitop_form &, uml::code_label lbl_delegate);` — emits one full form natively; on a fully-granted instruction it runs every bus step then retires; on a mid-instruction yield `generate_bus_step` JMPs to `lbl_delegate` and the partial interpreter handler resumes (OQ-1). Clobbers I0-I6; preserves I7 (`m_ird`).
 
-- [ ] **Step 1: Declare the form descriptor + emitter in the header.** In `m68000.h`, beside `generate_btst_imm8_absolute` (`:262`):
+- [x] **Step 1: Declare the form descriptor + emitter in the header.** In `m68000.h`, beside `generate_btst_imm8_absolute` (`:262`):
 ```cpp
 	enum bitop_family : u8 { BITOP_BTST, BITOP_BCHG, BITOP_BCLR, BITOP_BSET };
 	enum bitop_ea     : u8 { BITEA_AIS, BITEA_AIPS, BITEA_PAIS };   // (An), (An)+, -(An)
@@ -527,7 +527,7 @@ git commit -m "feat(m68000drc): generate_bus_step() DATA_WRITE branch (UML_WRITE
 	void generate_bitop_mem(drcuml_block &block, const struct bitop_form &form, uml::code_label lbl_delegate); // native bit-ops (An)/(An)+/-(An) (O-mem-2)
 ```
 
-- [ ] **Step 2: Add the shared `find_bus_run(value, mask)` helper.** O-mem-1's `find_run` is a local lambda matching by value only; O-mem-2 needs value+mask (the `Dn` forms reuse low bits). Add a file-local static in `m68000drc.cpp` above `generate_bitop_mem`:
+- [x] **Step 2: Add the shared `find_bus_run(value, mask)` helper.** O-mem-1's `find_run` is a local lambda matching by value only; O-mem-2 needs value+mask (the `Dn` forms reuse low bits). Add a file-local static in `m68000drc.cpp` above `generate_bitop_mem`:
 ```cpp
 static const drc_bus_run &find_bus_run(u16 value, u16 mask)
 {
@@ -538,7 +538,7 @@ static const drc_bus_run &find_bus_run(u16 value, u16 mask)
 }
 ```
 
-- [ ] **Step 3: Implement `generate_bitop_mem`.** In `m68000drc.cpp`, after `generate_btst_imm8_absolute` (`:675`). Read each handler line-by-line while transcribing (R-A). The emitter computes `ry` (and `rx` for `Dn`) at runtime from `I7`, emits the EA setup per `form.ea`, the bit number into `m_dcr`, then walks the run's steps via `generate_bus_step`, interleaving the per-state architectural setup, the modify, the Z, and the retire.
+- [x] **Step 3: Implement `generate_bitop_mem`.** In `m68000drc.cpp`, after `generate_btst_imm8_absolute` (`:675`). Read each handler line-by-line while transcribing (R-A). The emitter computes `ry` (and `rx` for `Dn`) at runtime from `I7`, emits the EA setup per `form.ea`, the bit number into `m_dcr`, then walks the run's steps via `generate_bus_step`, interleaving the per-state architectural setup, the modify, the Z, and the retire.
 
 ```cpp
 //-------------------------------------------------
@@ -794,22 +794,22 @@ void m68000_device::generate_bitop_mem(drcuml_block &block, const struct bitop_f
 > 2. **The Z timing.** The plan computes Z once at the write state (bcsm2) from `m_alub`, matching the handler. The `compute_z_from_dbin()` lambda is used only for `btst` (where Z is set at the final-prefetch state from `m_dbin`). Do **not** double-set Z. Confirm against `btst_imm8_ais_df` exactly where `sr_z()` sits.
 > 3. **The retire/final-prefetch transcription.** Rather than re-typing, **factor O-mem-1's `setup_final_prefetch` and `retire` lambdas out of `generate_btst_imm8_absolute` into file-local statics** (or member helpers) and call them from both emitters — they are byte-identical (`m68000drc.cpp:549-588`). This removes the only "transcribe again" step and keeps a single source for the retire/trace logic.
 
-- [ ] **Step 4: Refactor the shared retire/final-prefetch out of `generate_btst_imm8_absolute`.** Extract `setup_final_prefetch` (`:549-566`) and `retire` (`:567-588`) into file-local helpers `static void emit_final_prefetch_setup(m68000_device&, drcuml_block&)` and `static void emit_retire(m68000_device&, drcuml_block&, code_label&)` (passing whatever `m_drc_labelnum` access they need), and call them from both `generate_btst_imm8_absolute` and `generate_bitop_mem`. Confirm the O-mem-1 btst-absolute Leg B is byte-identical after the refactor (it is a pure extraction).
+- [x] **Step 4: Refactor the shared retire/final-prefetch out of `generate_btst_imm8_absolute`.** Extract `setup_final_prefetch` (`:549-566`) and `retire` (`:567-588`) into file-local helpers `static void emit_final_prefetch_setup(m68000_device&, drcuml_block&)` and `static void emit_retire(m68000_device&, drcuml_block&, code_label&)` (passing whatever `m_drc_labelnum` access they need), and call them from both `generate_btst_imm8_absolute` and `generate_bitop_mem`. Confirm the O-mem-1 btst-absolute Leg B is byte-identical after the refactor (it is a pure extraction).
 
-- [ ] **Step 5: Build (compile-only — no dispatch arm yet).**
+- [x] **Step 5: Build (compile-only — no dispatch arm yet).**
 ```bash
 MSYSTEM=MINGW64 /c/msys64/usr/bin/bash -lc 'export OS=Windows_NT; cd "$PWD"; mingw32-make REGENIE=1 && mingw32-make TESTS=1 -j32'
 ```
 Expected: clean build. `generate_bitop_mem` is defined but unreferenced (acceptable; Task 4 calls it). Fix any UML-scope/enum errors now.
 
-- [ ] **Step 6: Oracle unchanged (emitter dormant; btst-absolute exact after the refactor).**
+- [x] **Step 6: Oracle unchanged (emitter dormant; btst-absolute exact after the refactor).**
 ```bash
 ./mametests "[m68000][drc]"
 CPUORACLE_M68_DRC_FULLGRANT=1 ./mametests "[m68000][drc]"
 ```
 Expected: green — nothing dispatches to `generate_bitop_mem` yet, and the Step-4 extraction did not change the btst-absolute emission.
 
-- [ ] **Step 7: `srcclean` + commit.**
+- [x] **Step 7: `srcclean` + commit.**
 ```bash
 git add src/devices/cpu/m68000/m68000.h src/devices/cpu/m68000/m68000drc.cpp
 git commit -m "feat(m68000drc): generate_bitop_mem() EA-arithmetic + bit-modify emitter (no dispatch yet)"
@@ -827,7 +827,7 @@ git commit -m "feat(m68000drc): generate_bitop_mem() EA-arithmetic + bit-modify 
 **Interfaces:**
 - Consumes: `generate_bitop_mem` (Task 3), `drc_native_mem_ea_allowed()` (the O-mem-1 gate, unchanged — W6), `m_drc_native_mem_ea_arms` (probe counter).
 
-- [ ] **Step 1: Add the 24 patterns to `is_native_opcode`.** After the btst-absolute pattern (`:213-214`), add the bit-op `(An)/(An)+/-(An)` patterns. Keep it topology-independent (the gate is separate). The `#imm8` family bases are `0x0810/0x0850/0x0890/0x08D0` (btst/bchg/bclr/bset, mask `0xfff8`), `+0/0x08/0x10` for the three EAs; the `Dn` bases are `0x0110/0x0150/0x0190/0x01D0` (mask `0xf1f8`):
+- [x] **Step 1: Add the 24 patterns to `is_native_opcode`.** After the btst-absolute pattern (`:213-214`), add the bit-op `(An)/(An)+/-(An)` patterns. Keep it topology-independent (the gate is separate). The `#imm8` family bases are `0x0810/0x0850/0x0890/0x08D0` (btst/bchg/bclr/bset, mask `0xfff8`), `+0/0x08/0x10` for the three EAs; the `Dn` bases are `0x0110/0x0150/0x0190/0x01D0` (mask `0xf1f8`):
 ```cpp
 	// O-mem-2: btst/bchg/bclr/bset #n,(An)/(An)+/-(An)  (mask 0xfff8)
 	switch(opword & 0xfff8)
@@ -850,7 +850,7 @@ git commit -m "feat(m68000drc): generate_bitop_mem() EA-arithmetic + bit-modify 
 ```
 > **Verify each constant against the handler `// xxxx ffff` comment** before trusting it (e.g. `bchg_imm8_ais_df // 0850 fff8`, `bchg_dd_ais_df // 0150 f1f8`, `bset_imm8_pais_df`, `bclr_dd_aips_df`, …). A wrong base silently mis-classifies.
 
-- [ ] **Step 2: Add the gated dispatch arms.** In `generate_native_dispatch`, after the btst-absolute arm (`:259`), add a single `if (drc_native_mem_ea_allowed())` block with the 24-entry form table and a per-form compile-time arm. The probe counter increments per emitted arm (Task 7 of O-mem-1 reads it).
+- [x] **Step 2: Add the gated dispatch arms.** In `generate_native_dispatch`, after the btst-absolute arm (`:259`), add a single `if (drc_native_mem_ea_allowed())` block with the 24-entry form table and a per-form compile-time arm. The probe counter increments per emitted arm (Task 7 of O-mem-1 reads it).
 ```cpp
 	// O-mem-2: btst/bchg/bclr/bset (An)/(An)+/-(An), #imm8 and Dn source -- native
 	// ONLY behind the space-topology gate (ADR 0007 Addendum; W6).  Each arm calls the
@@ -901,33 +901,33 @@ git commit -m "feat(m68000drc): generate_bitop_mem() EA-arithmetic + bit-modify 
 ```
 > **Dispatch-order note:** the btst-absolute arm tests `(m_ird & 0xfffe) == 0x0838`. The O-mem-2 `#imm8` arms test `(m_ird & 0xfff8) == 0x08{1,5,9,d}0` — `0x0838 & 0xfff8 == 0x0838`, which is NOT one of the O-mem-2 bases (those are `..10/..50/..90/..d0`), so absolute (`0x0838/0x0839`) never collides with the `(An)`-class arms. Confirm no overlap by inspection; the masks are disjoint on the EA-mode field.
 
-- [ ] **Step 3: Build.**
+- [x] **Step 3: Build.**
 ```bash
 MSYSTEM=MINGW64 /c/msys64/usr/bin/bash -lc 'export OS=Windows_NT; cd "$PWD"; mingw32-make REGENIE=1 && mingw32-make TESTS=1 -j32'
 ```
 Expected: clean build.
 
-- [ ] **Step 4: Legacy Leg B (x64) — native step-1 + suspend handoff for all 24 forms.**
+- [x] **Step 4: Legacy Leg B (x64) — native step-1 + suspend handoff for all 24 forms.**
 ```bash
 ./mametests "[m68000]"            # Leg A
 ./mametests "[m68000][drc]"       # Leg B 1-cycle, x64
 ```
 Expected: green. The 1-cycle pass validates each form's native *first* step + the suspend yield; the tail (incl. the write) runs interpreter-side in both legs.
 
-- [ ] **Step 5: FULLY-GRANTED Leg B (x64 + C) — THE write-validation gate.**
+- [x] **Step 5: FULLY-GRANTED Leg B (x64 + C) — THE write-validation gate.**
 ```bash
 CPUORACLE_M68_DRC_FULLGRANT=1 ./mametests "[m68000][drc]"                       # x64
 CPUORACLE_M68_DRC_FULLGRANT=1 CPUORACLE_M68_DRC_C=1 ./mametests "[m68000][drc]" # C backend
 ```
 Expected: **green.** This is the first and only correctness-gate coverage of the native **data write** (its RAM byte, the SR.Z it sets, the per-bus-cycle charge), the EA writeback (`(An)+`/`-(An)`), the predecrement `−2`, and the bit-modify. **If a form fails:** `superpowers:systematic-debugging` — the failure names register/flag/RAM/cycle and the case; map it to the step (RAM divergence → write lane/value or EA address; cycle divergence → a charge or the predecrement `−2`; flag divergence → Z timing/source; A-reg divergence → the `(An)+`/`-(An)` writeback or the A7-by-2 delta). The fallback is to drop the failing form from `is_native_opcode` + the dispatch table (route it back to `cfunc_`) and report — never approximate, never weaken the assertion.
 
-- [ ] **Step 6: Legacy Leg B (C backend).**
+- [x] **Step 6: Legacy Leg B (C backend).**
 ```bash
 CPUORACLE_M68_DRC_C=1 ./mametests "[m68000][drc]"
 ```
 Expected: green (catches backend-divergent emission, R-C).
 
-- [ ] **Step 7: `srcclean` + commit.**
+- [x] **Step 7: `srcclean` + commit.**
 ```bash
 git add src/devices/cpu/m68000/m68000drc.cpp
 git commit -m "feat(m68000drc): native btst/bchg/bclr/bset (An)/(An)+/-(An) #imm8+Dn -- 24 forms (O-mem-2)"
@@ -946,7 +946,7 @@ git commit -m "feat(m68000drc): native btst/bchg/bclr/bset (An)/(An)+/-(An) #imm
 **Interfaces:**
 - Consumes: `m_cache_dirty` (`:58`, set `true` triggers resident-block regen at the next `code_flush_cache`, `:318`), `m_drc_native_mem_ea_arms` (probe), `drc_native_mem_ea_allowed()`.
 
-- [ ] **Step 1: Set `m_cache_dirty` on `m_mmu` change.** In `set_current_mmu()` (`:89-95`):
+- [x] **Step 1: Set `m_cache_dirty` on `m_mmu` change.** In `set_current_mmu()` (`:89-95`):
 ```cpp
 void m68000_device::set_current_mmu(mmu *mmu)
 {
@@ -970,7 +970,7 @@ void m68000_device::enable_mmu(bool disable_spaces)
 ```
 > **Why both clauses:** `drc_native_mem_ea_allowed()` tests `!m_disable_spaces && m_mmu == nullptr && …`. Both `enable_mmu` paths flip the gate, so both must dirty the cache. The guards avoid a needless flush when the value is unchanged. **Note:** this is a behavior change on the interpreter-only path too (it dirties a cache the interpreter ignores) — confirm `m_cache_dirty` is harmless when `!m_isdrc` (it is: only `execute_run_drc`/`code_flush_cache` read it).
 
-- [ ] **Step 2: Add the MMU-regen unit test.** In `cpuoracle.cpp`, beside the gate-predicate test (`[m68000][drc][gate]`), add a case that boots the flat oracle device (gate true, native arm emitted), attaches an MMU after emit, forces a re-flush, and asserts the native arm drops out:
+- [x] **Step 2: Add the MMU-regen unit test.** In `cpuoracle.cpp`, beside the gate-predicate test (`[m68000][drc][gate]`), add a case that boots the flat oracle device (gate true, native arm emitted), attaches an MMU after emit, forces a re-flush, and asserts the native arm drops out:
 ```cpp
 TEST_CASE("m68000 DRC native memory-EA gate re-evaluates on MMU attach (OQ-9)", "[cpu][m68000][drc][gate]")
 {
@@ -1002,14 +1002,14 @@ TEST_CASE("m68000 DRC native memory-EA gate re-evaluates on MMU attach (OQ-9)", 
 ```
 > **Harness hooks needed:** `force_block_emit()` (a passthrough that calls the device's `code_flush_cache()` once — add it beside the existing emission-probe plumbing from O-mem-1 Task 7), `attach_test_mmu()`/`detach_test_mmu()` (call `set_current_mmu(&stub_mmu)` / `set_current_mmu(nullptr)` on the oracle device, with a trivial stub `mmu` subclass). If `code_flush_cache()` is not cleanly callable from the harness, the minimal alternative is to expose a method that returns `drc_native_mem_ea_allowed()` after toggling the MMU and asserts the gate predicate directly (the predicate is the load-bearing check; the emit-count is belt-and-suspenders). Builder's call at first build — the **predicate re-evaluation after `set_current_mmu`** is the must-have assertion.
 
-- [ ] **Step 3: Build + run the gate tests.**
+- [x] **Step 3: Build + run the gate tests.**
 ```bash
 MSYSTEM=MINGW64 /c/msys64/usr/bin/bash -lc 'export OS=Windows_NT; cd "$PWD"; mingw32-make REGENIE=1 && mingw32-make TESTS=1 -j32'
 ./mametests "[m68000][drc][gate]"
 ```
 Expected: green — gate flips false on MMU attach (and the resident block regenerated), true on detach.
 
-- [ ] **Step 4: Full local gate (both passes, both backends) + `srcclean` + commit.**
+- [x] **Step 4: Full local gate (both passes, both backends) + `srcclean` + commit.**
 ```bash
 ./mametests "[m68000][drc]"
 CPUORACLE_M68_DRC_FULLGRANT=1 ./mametests "[m68000][drc]"
@@ -1031,7 +1031,7 @@ git commit -m "fix(m68000drc): regen resident block on MMU attach/enable so the 
 **Interfaces:**
 - Consumes: `is_native_opcode(u16)` (Task 4) for all 24 patterns.
 
-- [ ] **Step 1: Extend the native-coverage assertion.** Add the 24 representative encodings to the asserted-native set (one per form is enough; the predicate is mask-based). If `tests/emu/cpu/m68000_drc_coverage.cpp` does not exist (boundary N not landed — verified at O-mem-1 plan time), add the `CHECK`s to the existing `[m68000][drc][gate]` case in `cpuoracle.cpp` (where `is_native_opcode` is already exercised via the harness):
+- [x] **Step 1: Extend the native-coverage assertion.** Add the 24 representative encodings to the asserted-native set (one per form is enough; the predicate is mask-based). If `tests/emu/cpu/m68000_drc_coverage.cpp` does not exist (boundary N not landed — verified at O-mem-1 plan time), add the `CHECK`s to the existing `[m68000][drc][gate]` case in `cpuoracle.cpp` (where `is_native_opcode` is already exercised via the harness):
 ```cpp
 	// O-mem-2: bit-ops on (An)/(An)+/-(An), #imm8 and Dn source, are native (behind the gate).
 	for(u16 op : { (u16)0x0810,(u16)0x0818,(u16)0x0820, (u16)0x0850,(u16)0x0858,(u16)0x0860,
@@ -1042,7 +1042,7 @@ git commit -m "fix(m68000drc): regen resident block on MMU attach/enable so the 
 ```
 (Use whatever wrapper O-mem-1 Task 7 added to reach the protected `is_native_opcode` from the test TU; `is_native_opcode` is a protected static — the gate test already routes around this.)
 
-- [ ] **Step 2: Update the cut-line doc.** In `src/devices/cpu/m68000/README-drc.md`:
+- [x] **Step 2: Update the cut-line doc.** In `src/devices/cpu/m68000/README-drc.md`:
   - In "Native opcodes shipped (current)" (`:191`), add a row:
 ```markdown
 | `btst`/`bchg`/`bclr`/`bset` `#n`\|`Dn`,`(An)`/`(An)+`/`-(An)` | O-mem-2 | 24 forms. RMW (`bchg`/`bclr`/`bset`) via the write-side `generate_bus_step()` (`UML_WRITEM`, byte-lane mask, value from `m_dbout`); `btst` read-only. EA arithmetic with the A7-byte-by-2 rule and the predecrement internal `−2`; Z from the original byte. **Native ONLY on a flat-topology, non-MMU bus (`drc_native_mem_ea_allowed()`)** — `AS_OPCODES`/user-space/MMU machines stay `cfunc_` (ADR 0007 Addendum). Native write validated by the fully-granted Leg-B pass (ADR 0007 W4). |
@@ -1050,7 +1050,7 @@ git commit -m "fix(m68000drc): regen resident block on MMU attach/enable so the 
   - In the bit-ops / register-indirect notes, update "Explicitly NOT native" to exclude these 24 forms (reword: "`bchg`/`bclr`/`bset` memory-EA except `(An)`/`(An)+`/`-(An)`, native as of O-mem-2 on a flat-topology non-MMU bus").
   - In "Known limitations", append: the native **retire** lambda is the one native residual not oracle-exercised (the snapshot model cannot reach an overshoot; W4 — bounded, mirrors the validated `moveq` tail); and the deferring-tap redo path stays gated-by-absence (OQ-6).
 
-- [ ] **Step 3: Full local gate (every pass, both backends).**
+- [x] **Step 3: Full local gate (every pass, both backends).**
 ```bash
 MSYSTEM=MINGW64 /c/msys64/usr/bin/bash -lc 'export OS=Windows_NT; cd "$PWD"; mingw32-make REGENIE=1 && mingw32-make TESTS=1 -j32'
 ./mametests "[m68000]"                                                          # Leg A
@@ -1064,7 +1064,7 @@ CPUORACLE_M68_DRC_FULLGRANT=1 CPUORACLE_M68_DRC_C=1 ./mametests "[m68000][drc]" 
 ```
 Expected: all green; `-validate` clean. This is the **necessary** local gate.
 
-- [ ] **Step 4: Push the branch and open the PR; get the appserver Linux `oracle` job GREEN.** This is the **sufficient** gate. Confirm the Linux `oracle` job runs all five oracle invocations above (1-cycle + full-grant, x64 + C, plus the gate/asopcodes cases) — if the CI matrix does not yet pass `CPUORACLE_M68_DRC_FULLGRANT=1`, **add that leg to the `oracle` workflow** (it is a required gate per the addendum; a full-grant pass that never runs in CI is not a gate). A red Linux job with green Windows is almost always an ABI-safety regression (a plain `mem(&field)` slipped in — audit every new UML operand) or a backend-divergent emission. Do not merge until the Linux `oracle` job is green.
+- [x] **Step 4: Push the branch and open the PR; get the appserver Linux `oracle` job GREEN.** This is the **sufficient** gate. Confirm the Linux `oracle` job runs all five oracle invocations above (1-cycle + full-grant, x64 + C, plus the gate/asopcodes cases) — if the CI matrix does not yet pass `CPUORACLE_M68_DRC_FULLGRANT=1`, **add that leg to the `oracle` workflow** (it is a required gate per the addendum; a full-grant pass that never runs in CI is not a gate). A red Linux job with green Windows is almost always an ABI-safety regression (a plain `mem(&field)` slipped in — audit every new UML operand) or a backend-divergent emission. Do not merge until the Linux `oracle` job is green.
 ```bash
 git add tests/emu/cpu/cpuoracle.cpp src/devices/cpu/m68000/README-drc.md
 git commit -m "test+docs(m68000drc): assert 24 bit-op forms native; record O-mem-2 write side in cut-line doc"
@@ -1072,9 +1072,9 @@ git push -u origin <branch>
 gh pr create --fill   # PR body: Docs Impact + the gate evidence (both oracle passes green on Linux)
 ```
 
-- [ ] **Step 5: Re-run the throughput benchmark on a gate-eligible flat-topology driver.** Per the §5 addendum honest-number note, do **NOT** name an FD1094/`AS_OPCODES` set (its bit-ops run `cfunc_`). Measure `-drc 0` vs `-drc 1` on a flat-topology 68000 driver where the RMW bit-ops are hot; record the number in the PR. Does not gate merge (correctness gates merge), but it is the evidence the write side is worth it.
+- [x] **Step 5: Re-run the throughput benchmark on a gate-eligible flat-topology driver.** Per the §5 addendum honest-number note, do **NOT** name an FD1094/`AS_OPCODES` set (its bit-ops run `cfunc_`). Measure `-drc 0` vs `-drc 1` on a flat-topology 68000 driver where the RMW bit-ops are hot; record the number in the PR. Does not gate merge (correctness gates merge), but it is the evidence the write side is worth it.
 
-- [ ] **Step 6: Merge per the auto-merge policy.** When all of: both oracle passes green (x64 + C) on the Linux `oracle` job, the gate-predicate + MMU-regen + AS_OPCODES differential green, generator additive (only `m68000-drcdesc.ipp` grew), code review clean, `-validate` clean — **merge** (implementation cycle complete, parity gates green, review clean, issues addressed). Do not stop to ask.
+- [x] **Step 6: Merge per the auto-merge policy.** When all of: both oracle passes green (x64 + C) on the Linux `oracle` job, the gate-predicate + MMU-regen + AS_OPCODES differential green, generator additive (only `m68000-drcdesc.ipp` grew), code review clean, `-validate` clean — **merge** (implementation cycle complete, parity gates green, review clean, issues addressed). Do not stop to ask.
 
 ---
 

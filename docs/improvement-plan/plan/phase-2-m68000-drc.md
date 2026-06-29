@@ -1,9 +1,9 @@
 # Phase 2 — m68000 → DRCUML port (Pick 2)
 
-> **Status:** In progress — **PR boundaries K + L + M shipped** (Tasks 1–5) · **Consumes:** ADR [0002](../adr/0002-m68000-drcuml-port.md)
+> **Status:** In progress — **PR boundaries K + L + M shipped** (Tasks 1–5) · **boundary O: O-mem-1 + O-mem-2 shipped** · **Consumes:** ADR [0002](../adr/0002-m68000-drcuml-port.md)
 > **Hard gate:** ADR [0001](../adr/0001-differential-cpu-oracle.md) — the m68000 oracle
 > **Spec:** [`../specs/2026-06-24-mame-improvements-design.md`](../specs/2026-06-24-mame-improvements-design.md)
-> **Date:** 2026-06-24 · **Last updated:** 2026-06-27 (boundary M shipped — single resident-block DISPATCH + the first native opcode (moveq) via hybrid handoff; dual-leg cycle-exact on x64 + C backends. **The memory-EA half — the hot path — is now designed in [ADR 0007](../adr/0007-m68000-native-memory-ea-suspend-mechanism.md) (all 5 open questions resolved), and boundary O / Task 10's first batch (O-mem-1) is fully planned in [`phase-2-o-mem-1-btst-absolute.md`](phase-2-o-mem-1-btst-absolute.md) — ready for Builder.**)
+> **Date:** 2026-06-24 · **Last updated:** 2026-06-28 (boundary O / O-mem-2 shipped — the **write side** of `generate_bus_step()` (`UML_WRITEM` + byte-lane mask + the `-(An)` predecrement `pre_charge`) and the 24 native bit-op forms `btst`/`bchg`/`bclr`/`bset` `(An)`/`(An)+`/`-(An)` (`#imm8`+`Dn`), behind the O-mem-1 space-topology gate. Validated by the new **fully-granted Leg-B oracle pass** (ADR 0007 W4 — the first correctness-gate coverage of the native data write; also baselined O-mem-1's native tail clean) + the **AS_OPCODES differential** + the **OQ-9 MMU-regen** safeguard; cycle-exact on x64 (drcbex64) + C (drcbec). Generator-additive. Next: memory-EA MOVE/ALU (O-mem-3+).)
 
 ## Goal
 

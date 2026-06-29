@@ -88,6 +88,13 @@ bool m68000_device::drc_native_mem_ea_allowed() const
 
 void m68000_device::set_current_mmu(mmu *mmu)
 {
+	// OQ-9 (ADR 0007 Addendum): drc_native_mem_ea_allowed() tests m_mmu == nullptr,
+	// and the resident block is emitted once at the first code_flush_cache().  If an
+	// MMU is attached/detached AFTER that emit (Apple Lisa / Sun-1 / SGI pm2 attach a
+	// custom MMU to a type()==M68000 CPU), dirty the cache so the block regenerates and
+	// the gate re-evaluates.  Harmless on the interpreter path (only the DRC reads it).
+	if(m_mmu != mmu)
+		m_cache_dirty = true;
 	m_mmu = mmu;
 
 	if(m_mmu)
@@ -128,6 +135,10 @@ bool m68000_device::mmu_disabled::translate(int spacenum, int intention, offs_t 
 
 void m68000_device::enable_mmu(bool disable_spaces)
 {
+	// OQ-9: both m_mmu and m_disable_spaces feed drc_native_mem_ea_allowed(), so dirty
+	// the cache whenever either changes (guarded to avoid a needless flush when unchanged).
+	if(m_mmu != &m_mmu_disabled || m_disable_spaces != disable_spaces)
+		m_cache_dirty = true;
 	m_mmu = &m_mmu_disabled;
 	m_disable_spaces = disable_spaces;
 }

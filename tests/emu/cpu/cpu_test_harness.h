@@ -129,6 +129,14 @@ public:
 	// # of gated memory-EA dispatch arms emitted in the last resident-block build
 	// (0 => the btst-absolute arm was gated out).  Overridden by oracle_m68000_device.
 	virtual uint32_t oracle_native_arm_emit_count() const { return 0; }
+	// OQ-9 regen test: attach (true) / detach (false) a stub MMU at runtime via
+	// set_current_mmu(), which must dirty the DRC cache so the gate re-evaluates on the
+	// next resident-block build.  Overridden by oracle_m68000_device; no-op otherwise.
+	virtual void oracle_set_test_mmu(bool attach) { }
+	// Native-coverage assertion: does the live core's is_native_opcode() predicate
+	// classify this opword as having a native fast-path?  (is_native_opcode is a
+	// protected static, reachable only from the device subclass.)  Default false.
+	virtual bool oracle_is_native_opcode(uint16_t opword) const { return false; }
 };
 
 // Describes one CPU core: how to register its driver and how to translate
@@ -201,6 +209,10 @@ public:
 	bool native_mem_ea_allowed() const;
 	// # of gated memory-EA dispatch arms emitted in the last resident-block build.
 	uint32_t native_arm_emit_count() const;
+	// OQ-9 regen test: attach/detach a stub MMU at runtime (via set_current_mmu()).
+	void set_test_mmu(bool attach);
+	// Native-coverage assertion: is this opword classified native by is_native_opcode()?
+	bool is_native_opcode(uint16_t opword) const;
 
 	// Reset the CPU to a clean, between-instructions boundary.
 	void reset_cpu();
@@ -248,6 +260,9 @@ public:
 	// Flat RAM access into the CPU's program space.
 	void write_ram(uint32_t address, uint8_t value);
 	uint8_t read_ram(uint32_t address) const;
+	// Write a byte into AS_OPCODES if the device has a separate opcode space (the
+	// AS_OPCODES differential, Task 0); routes to AS_PROGRAM for flat configs.
+	void write_opcode_ram(uint32_t address, uint8_t value);
 
 	// Flat RAM access into the CPU's I/O space (for IN/OUT instructions): the
 	// fixture's port read values are written here before stepping and port

@@ -1234,6 +1234,195 @@ TEST_CASE("CPU oracle m68000 Leg B (interpreter == DRC)", "[cpu][m68000][drc]")
 
 
 //**************************************************************************
+//  M68000 AS_OPCODES DIFFERENTIAL (O-mem-2 Task 0)
+//**************************************************************************
+//
+//  Replays the bit-op corpus subset on a device with a SEPARATE AS_OPCODES
+//  space (its own backing RAM, distinct address_space* from AS_PROGRAM), -drc 0
+//  vs -drc 1.  Because m_s_program != m_s_opcodes the space-topology gate is
+//  FALSE, so the native memory-EA arm is NOT emitted there: the bit-ops run via
+//  the cfunc_ interpreter fallback.  The test proves (a) the gate IS off on this
+//  topology (anti-vacuity), and (b) the cfunc_ fallback matches the interpreter
+//  AND the DRC does not mis-read the opcode space -- i.e. it is the test that
+//  would have caught the original O-mem-1 wrong-space bug.  It does NOT enable
+//  native AS_OPCODES (out of scope).
+//
+//  Scope (O-mem-2, user-confirmed): the corpus's flat memory model carries no
+//  per-cell PROGRAM/OPCODES tag, so a clean split is impractical; the instruction
+//  stream is MIRRORED into BOTH spaces (the real instructions execute, opcode
+//  fetches resolve from AS_OPCODES, data from AS_PROGRAM).  The load-bearing
+//  merge-gate assertions -- gate OFF + interpreter == DRC on the separate-
+//  AS_OPCODES topology -- hold regardless.  Restricted to the bit-op corpus
+//  subset (the opcodes O-mem-2 makes native, i.e. the set the gate must guard).
+
+TEST_CASE("CPU oracle m68000 Leg B -- separate AS_OPCODES (gate keeps cfunc_)", "[cpu][m68000][drc][asopcodes]")
+{
+	std::vector<fs::path> all = collect_fixtures(ORACLE_M68000_DIR);
+	if (all.empty())
+	{
+		SUCCEED("m68000 fixtures not present -- run tests/cpuoracle/fetch_vectors.py --cores m68000; skipping");
+		return;
+	}
+
+	// the bit-op corpus subset = the opcodes O-mem-2 makes native
+	static const char *const k_bitop_files[] = { "BCHG.json", "BCLR.json", "BSET.json", "BTST.json" };
+	std::vector<fs::path> fixtures;
+	for (const fs::path &p : all)
+		for (const char *bf : k_bitop_files)
+			if (p.filename().string() == bf)
+				fixtures.push_back(p);
+	REQUIRE_FALSE(fixtures.empty());   // anti-vacuity: the bit-op corpus must be present
+
+	struct Obs
+	{
+		std::string file, name;
+		std::array<std::uint64_t, 17> da;
+		std::uint16_t sr;
+		std::uint32_t au_pc;
+		std::vector<std::pair<std::uint32_t, std::uint8_t>> ram;
+		int consumed;
+	};
+	static const char *const k_da_fields[17] = {
+		"d0", "d1", "d2", "d3", "d4", "d5", "d6", "d7",
+		"a0", "a1", "a2", "a3", "a4", "a5", "a6", "usp", "ssp",
+	};
+
+	// Apply one case (seeding the instruction/data bytes into BOTH spaces) and read
+	// back the observed tuple -- byte-identical inputs across the two legs.
+	auto run_one =
+			[&] (cpuoracle::cpu_test_harness &h, const std::string &fname,
+					const rapidjson::Value &test) -> Obs
+			{
+				const rapidjson::Value &initial = test["initial"];
+				const rapidjson::Value &final = test["final"];
+				REQUIRE(test.HasMember("length"));
+				const int expected_cycles = int(test["length"].GetInt64());
+
+				h.prepare_case();
+				auto zero_both = [&] (std::uint32_t a) { h.write_ram(a, 0); h.write_opcode_ram(a, 0); };
+				if (initial.HasMember("ram") && initial["ram"].IsArray())
+					for (const auto &c : initial["ram"].GetArray()) zero_both(std::uint32_t(c[0].GetInt64()));
+				if (final.HasMember("ram") && final["ram"].IsArray())
+					for (const auto &c : final["ram"].GetArray()) zero_both(std::uint32_t(c[0].GetInt64()));
+				// seed initial RAM into BOTH spaces (mirrored: opcodes resolve from
+				// AS_OPCODES, data from AS_PROGRAM)
+				if (initial.HasMember("ram") && initial["ram"].IsArray())
+					for (const auto &c : initial["ram"].GetArray())
+					{
+						std::uint32_t a = std::uint32_t(c[0].GetInt64());
+						std::uint8_t v = std::uint8_t(c[1].GetInt64());
+						h.write_ram(a, v);
+						h.write_opcode_ram(a, v);
+					}
+				if (initial.HasMember("sr") && initial["sr"].IsInt())
+					h.set_reg("sr", std::uint64_t(initial["sr"].GetInt64()));
+				for (auto it = initial.MemberBegin(); it != initial.MemberEnd(); ++it)
+				{
+					const char *name = it->name.GetString();
+					if (std::string(name) == "pc" || std::string(name) == "sr") continue;
+					if (!it->value.IsInt() && !it->value.IsUint() && !it->value.IsInt64() && !it->value.IsUint64()) continue;
+					if (h.has_reg(name)) h.set_reg(name, std::uint64_t(it->value.GetInt64()));
+				}
+				if (initial.HasMember("pc") && initial["pc"].IsInt64())
+					h.set_reg("pc", std::uint32_t(initial["pc"].GetInt64()) - 4);
+
+				std::vector<std::uint32_t> watch;
+				if (final.HasMember("ram") && final["ram"].IsArray())
+					for (const auto &c : final["ram"].GetArray())
+						watch.push_back(std::uint32_t(c[0].GetInt64()));
+				h.set_ram_watch(watch);
+
+				Obs o;
+				o.file = fname;
+				o.name = test.HasMember("name") ? test["name"].GetString() : "<unnamed>";
+				o.consumed = h.step_one_instruction(expected_cycles);
+				for (int i = 0; i < 17; i++)
+				{
+					std::uint64_t s = 0;
+					o.da[i] = h.snapshot_reg(k_da_fields[i], s) ? s : h.get_reg(k_da_fields[i]);
+				}
+				{ std::uint64_t s = 0; o.sr = std::uint16_t(h.snapshot_reg("sr", s) ? s : h.get_reg("sr")); }
+				{ std::uint32_t au = 0; o.au_pc = h.retired_pc(au) ? au : std::uint32_t(h.get_reg("pc")); }
+				for (std::uint32_t a : watch)
+				{
+					std::uint8_t b = 0;
+					o.ram.emplace_back(a, h.snapshot_ram(a, b) ? b : h.read_ram(a));
+				}
+				return o;
+			};
+
+	auto replay =
+			[&] (bool drc, bool expect_drc, std::vector<Obs> &out)
+			{
+				cpuoracle::cpu_test_harness h(cpuoracle::m68000_asopcodes_core_descriptor());
+				h.set_drc(drc);
+				const bool ran = h.run_with_machine(
+						[&] ()
+						{
+							REQUIRE(h.drc_engaged() == expect_drc);
+							if (drc)
+							{
+								// anti-vacuity: separate AS_OPCODES -> gate FALSE -> the native
+								// memory-EA arm is NOT emitted (bit-ops fall to cfunc_).
+								h.reset_cpu();
+								h.step_one_instruction(64);     // force resident-block emission
+								CHECK_FALSE(h.native_mem_ea_allowed());
+								CHECK(h.native_arm_emit_count() == 0);
+							}
+							for (const fs::path &path : fixtures)
+							{
+								const std::string fname = path.filename().string();
+								std::string text;
+								REQUIRE(read_file(path, text));
+								rapidjson::Document doc;
+								doc.Parse(text.c_str());
+								INFO("fixture: " << fname);
+								REQUIRE_FALSE(doc.HasParseError());
+								REQUIRE(doc.IsArray());
+								for (const auto &test : doc.GetArray())
+									out.push_back(run_one(h, fname, test));
+							}
+						});
+				REQUIRE(ran);
+			};
+
+	std::vector<Obs> interp, drc;
+	replay(/*drc=*/false, /*expect_drc=*/false, interp);
+	replay(/*drc=*/true,  /*expect_drc=*/true,  drc);
+
+	REQUIRE_FALSE(interp.empty());
+	REQUIRE(interp.size() == drc.size());
+
+	std::size_t compared = 0;
+	for (std::size_t i = 0; i < interp.size(); i++)
+	{
+		const Obs &a = interp[i], &b = drc[i];
+		INFO("case index " << i << "  file: " << a.file << "  name: " << a.name);
+		REQUIRE(a.file == b.file);
+		REQUIRE(a.name == b.name);
+		for (int r = 0; r < 17; r++)
+		{
+			INFO("field " << k_da_fields[r] << " interp=" << a.da[r] << " drc=" << b.da[r]);
+			REQUIRE(a.da[r] == b.da[r]);
+		}
+		{ INFO("field sr interp=" << a.sr << " drc=" << b.sr); REQUIRE(a.sr == b.sr); }
+		{ INFO("field pc(au) interp=" << a.au_pc << " drc=" << b.au_pc); REQUIRE(a.au_pc == b.au_pc); }
+		REQUIRE(a.ram.size() == b.ram.size());
+		for (std::size_t k = 0; k < a.ram.size(); k++)
+		{
+			INFO("field ram[" << a.ram[k].first << "] interp=" << int(a.ram[k].second) << " drc=" << int(b.ram[k].second));
+			REQUIRE(a.ram[k].first == b.ram[k].first);
+			REQUIRE(a.ram[k].second == b.ram[k].second);
+		}
+		{ INFO("field cycles interp=" << a.consumed << " drc=" << b.consumed); REQUIRE(a.consumed == b.consumed); }
+		++compared;
+	}
+	WARN("m68000 oracle [Leg B AS_OPCODES diff]: " << fixtures.size() << " bit-op fixtures, "
+			<< compared << " cases compared (gate OFF, cfunc_ == interpreter); all equal.");
+}
+
+
+//**************************************************************************
 //  M68000 DRC NATIVE MEMORY-EA SPACE-TOPOLOGY GATE (Task 7)
 //**************************************************************************
 //
@@ -1275,4 +1464,71 @@ TEST_CASE("m68000 DRC native memory-EA space-topology gate", "[cpu][m68000][drc]
 	probe(m68000_asopcodes_core_descriptor(),  false);  // separate AS_OPCODES: gate FALSE
 	probe(m68000_userspace_core_descriptor(),  false);  // AS_USER_PROGRAM: gate FALSE
 	probe(m68000_mmu_core_descriptor(),        false);  // MMU attached: gate FALSE
+}
+
+// OQ-9 (ADR 0007 Addendum): set_current_mmu()/enable_mmu() must dirty the DRC cache
+// so the resident block regenerates and drc_native_mem_ea_allowed() re-evaluates when
+// an MMU is attached/detached AFTER the block was first emitted (Apple Lisa / Sun-1 /
+// SGI pm2 attach a custom MMU to a type()==M68000 CPU).  Attach an MMU post-emit and
+// assert the native arm drops out; detach and assert it returns.
+TEST_CASE("m68000 DRC native memory-EA gate re-evaluates on MMU attach (OQ-9)", "[cpu][m68000][drc][gate]")
+{
+	using namespace cpuoracle;
+
+	cpu_test_harness h(m68000_core_descriptor());   // flat bus -> gate true at start
+	h.set_drc(true);                                // engage the DRC so the block is emitted
+	bool ran = h.run_with_machine([&]
+	{
+		REQUIRE(h.drc_engaged());                       // anti-vacuity: DRC really on
+		// flat bus: gate true, native memory-EA arms emitted on the first build
+		h.reset_cpu();
+		h.step_one_instruction(64);                     // force resident-block emission
+		CHECK(h.native_mem_ea_allowed());
+		CHECK(h.native_arm_emit_count() > 0);
+		// attach an MMU AFTER the block was emitted: set_current_mmu() dirties the
+		// cache (the OQ-9 fix), the predicate flips immediately, and the NEXT build
+		// drops the native arm so dispatch falls to cfunc_.
+		h.set_test_mmu(true);
+		CHECK_FALSE(h.native_mem_ea_allowed());          // predicate re-evaluates now
+		h.step_one_instruction(64);                      // regenerates (m_cache_dirty)
+		CHECK(h.native_arm_emit_count() == 0);
+		// symmetry: detach -> gate true, arm returns on the next build
+		h.set_test_mmu(false);
+		CHECK(h.native_mem_ea_allowed());
+		h.step_one_instruction(64);
+		CHECK(h.native_arm_emit_count() > 0);
+	});
+	REQUIRE(ran);
+}
+
+// O-mem-2 native coverage: every one of the 24 bit-op forms (btst/bchg/bclr/bset
+// x (An)/(An)+/-(An) x #imm8/Dn) is classified native by is_native_opcode(), and
+// representative out-of-scope forms are NOT (so the predicate did not over-match).
+TEST_CASE("m68000 DRC native coverage -- 24 bit-op memory-EA forms", "[cpu][m68000][drc][gate]")
+{
+	using namespace cpuoracle;
+	cpu_test_harness h(m68000_core_descriptor());
+	h.set_drc(true);
+	bool ran = h.run_with_machine([&]
+	{
+		REQUIRE(h.drc_engaged());
+		// the 24 O-mem-2 forms -- one representative encoding per form
+		static const std::uint16_t k_native[] = {
+			0x0810, 0x0818, 0x0820,  0x0850, 0x0858, 0x0860,   // btst/bchg #imm8
+			0x0890, 0x0898, 0x08a0,  0x08d0, 0x08d8, 0x08e0,   // bclr/bset #imm8
+			0x0110, 0x0118, 0x0120,  0x0150, 0x0158, 0x0160,   // btst/bchg Dn
+			0x0190, 0x0198, 0x01a0,  0x01d0, 0x01d8, 0x01e0,   // bclr/bset Dn
+		};
+		for (std::uint16_t op : k_native)
+		{
+			INFO("opword " << std::hex << op);
+			CHECK(h.is_native_opcode(op));
+		}
+		// out-of-scope bit-op EAs must NOT be native (predicate did not over-match):
+		//   bchg #imm8,Dn (0x0840), bchg #imm8,(d16,An) (0x0868), btst Dn,Dn (0x0100)
+		CHECK_FALSE(h.is_native_opcode(0x0840));
+		CHECK_FALSE(h.is_native_opcode(0x0868));
+		CHECK_FALSE(h.is_native_opcode(0x0100));
+	});
+	REQUIRE(ran);
 }

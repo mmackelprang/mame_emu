@@ -83,7 +83,8 @@ insensitive cycle cost and no fault surface in user mode:
   (`asl`/`asr`/`lsl`/`lsr`/`rol`/`ror`/`roxl`/`roxr`), multiply/divide
   (`muls`/`mulu`/`divs`/`divu`), BCD (`abcd`/`sbcd`/`nbcd`), extended ALU
   (`addx`/`subx`/`negx`), bit ops `btst`/`bchg`/`bclr`/`bset` (except
-  `btst #n,(xxx).W/.L`, native as of O-mem-1 **on a flat-topology non-MMU bus only**), `tas`,
+  `btst #n,(xxx).W/.L`, native as of O-mem-1, and `btst`/`bchg`/`bclr`/`bset` `#n`\|`Dn`,`(An)`/`(An)+`/`-(An)`,
+  native as of O-mem-2 — all **on a flat-topology non-MMU bus only**), `tas`,
   and the `ccr` / `sr` / `usp` operand forms — all `cfunc_` in increment 1.
 
 ### Hard `cfunc_` boundaries (never native in increment 1, by category)
@@ -192,6 +193,7 @@ This document is updated when the native set changes (each coverage-widening inc
 |---|---|---|
 | `moveq #imm,Dn` | M | CASE 0 native (register/flag write + prefetch-pipe advance); timing tail `cfunc_`'d to the interpreter via the hybrid handoff. |
 | `btst #n,(xxx).W` / `.L` | O-mem-1 | Full native via `generate_bus_step()` — 4-read (.W) / 5-read (.L) interruptible-read sequence with per-bus-cycle charge, suspend checkpoint, and address-error branch; resume after a mid-instruction yield owned by the interpreter's partial handler (ADR 0007 OQ-1). **Native ONLY on a flat-topology, non-MMU bus (`drc_native_mem_ea_allowed()`): when a driver configures `AS_OPCODES` (decrypted opcodes, e.g. FD1094) / user spaces / an MMU the opcode stays `cfunc_` (ADR 0007 Addendum 2026-06-28).** |
+| `btst`/`bchg`/`bclr`/`bset` `#n`\|`Dn`,`(An)`/`(An)+`/`-(An)` | O-mem-2 | 24 forms (`btst`×6 read-only, `bchg`/`bclr`/`bset`×18 RMW). RMW via the **write-side** `generate_bus_step()` (`UML_WRITEM`, byte-lane mask, value from `m_dbout`); `btst` read-only. EA arithmetic with the A7-byte-by-2 rule and the `-(An)` predecrement internal `−2` (single-sourced as the descriptor's `pre_charge`); the bit is modified at the refill-prefetch state but **Z is set from the ORIGINAL byte** before the write. Substates/charges single-sourced from the generator. **Native ONLY on a flat-topology, non-MMU bus (`drc_native_mem_ea_allowed()`)** — `AS_OPCODES`/user-space/MMU machines stay `cfunc_` (ADR 0007 Addendum). The native data-write is validated by the fully-granted Leg-B oracle pass (ADR 0007 W4). |
 
 ### Known limitations
 
@@ -201,9 +203,18 @@ This document is updated when the native set changes (each coverage-widening inc
   `m_s_program`/`m_s_opcodes`/`m_s_uprogram`/`m_s_uopcodes` resolve to the same `address_space` and
   `m_mmu == nullptr`. The native memory-EA dispatch arms are gated on this compile-time predicate; on
   any other topology the opcode falls through to `cfunc_` (ADR 0007 Addendum 2026-06-28).
-- **Non-interruptible reads (OQ-6, deferred to O-mem-2).** Native memory-EA reads use non-interruptible
-  `UML_READ`, exact only on non-deferring buses (`UML_READ ≡ read_interruptible` on plain RAM/ROM, which
-  never defers, charges no wait-states, and never sets `m_access_to_be_redone`); interruptible/wait-state
-  native reads on deferring-tap buses are deferred to ADR 0007 **OQ-6** (O-mem-2). Within the gate, no
-  in-scope plain-M68000 DRC driver taps the program/data path, so the descriptor's redo path is
-  gated-by-absence (dormant-but-correct).
+- **Non-interruptible reads AND writes (OQ-6, stays deferred).** Native memory-EA reads use
+  non-interruptible `UML_READ` and writes use `UML_WRITEM`, exact only on non-deferring buses
+  (`UML_READ ≡ read_interruptible` / `UML_WRITEM ≡ write_interruptible` on plain RAM/ROM, which never
+  defers, charges no wait-states, and never sets `m_access_to_be_redone`); interruptible/wait-state native
+  accesses on deferring-tap buses remain deferred (ADR 0007 **OQ-6**, re-confirmed for writes by the
+  O-mem-2 addendum). Within the gate, no in-scope plain-M68000 DRC driver taps the program/data path, so
+  the descriptor's redo path (read AND write redo arms) is gated-by-absence (dormant-but-correct). Closing
+  it requires a deferring-tap oracle corpus config, distinct from the W4 fully-granted pass, built only
+  when a tapping driver is actually targeted.
+- **Native retire not oracle-exercised (W4 residual).** The fully-granted Leg-B pass yields at the last
+  bus access (`m_icount == 0`), so the bus-free native **retire** lambda (the `m_inst_state` dispatch +
+  `set_ftu_const` cfunc + trace arm) runs only in production under a `> length` grant; the snapshot model
+  cannot reach it without overshooting (which would advance into the next instruction). Bounded, low-risk
+  (it mirrors the validated boundary-M `moveq` tail and routes `set_ftu_const` through the interpreter's
+  own cfunc), logged as a known limitation, not a blocker.

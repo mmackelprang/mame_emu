@@ -260,6 +260,14 @@ protected:
 	void generate_moveq(drcuml_block &block);   // native UML for moveq #imm,Dn (boundary M's first native opcode; decodes m_ird at runtime)
 	void generate_bus_step(drcuml_block &block, const struct drc_bus_step &step, uml::code_label lbl_delegate); // one native 68000 bus read step (ADR 0007)
 	void generate_btst_imm8_absolute(drcuml_block &block, uml::code_label lbl_delegate); // native btst #n,(xxx).W/.L (O-mem-1)
+	// O-mem-2: native btst/bchg/bclr/bset #n|Dn,(An)/(An)+/-(An) (24 forms).  One
+	// parameterized emitter driven by the generated bus-step run; family/EA/source
+	// are compile-time constants in the dispatch table (m68000drc.cpp).
+	enum bitop_family : u8 { BITOP_BTST, BITOP_BCHG, BITOP_BCLR, BITOP_BSET };
+	enum bitop_ea     : u8 { BITEA_AIS, BITEA_AIPS, BITEA_PAIS };   // (An), (An)+, -(An)
+	enum bitop_src    : u8 { BITSRC_IMM8, BITSRC_DN };
+	struct bitop_form { u16 value; u16 mask; u8 family; u8 ea; u8 src; };
+	void generate_bitop_mem(drcuml_block &block, const struct bitop_form &form, uml::code_label lbl_delegate);
 	static bool is_native_opcode(u16 opword);   // the predicate identifying opcodes with a native fast-path
 	void func_interpret_quantum();              // run the interpreter for the granted quantum (the cfunc body)
 	static void cfunc_interpret_quantum(void *param);

@@ -108,10 +108,13 @@ void m68000_device::code_flush_cache()
 		// resident block (begin_block allocates maxinst*9/4 instruction slots and
 		// drcuml_block_append throws emu_fatalerror "Overran maxinst" past that).
 		// boundary M's 64 sufficed for moveq alone (~50 ins); O-mem-1's native
-		// btst-absolute (.W 4-read + .L 5-read sequences) brings the block to
-		// ~530 instructions, and later O-mem batches add more -- size it with
-		// headroom so adding an opcode does not silently overrun the block.
-		drcuml_block &block(m_drcuml->begin_block(1024));
+		// btst-absolute (.W 4-read + .L 5-read sequences) brought the block to
+		// ~530 instructions; O-mem-2's 24 bit-op forms (each a full ext/EA/read/
+		// modify/refill/write/retire sequence) add ~4k more -- size it with
+		// headroom so adding an opcode does not silently overrun the block.  At
+		// 8192 the transient descriptor allocation (~18k slots) is a small
+		// fraction of the 8 MiB DRC cache.
+		drcuml_block &block(m_drcuml->begin_block(8192));
 		static_generate_entry_point(block);
 		block.end();
 	}
@@ -212,6 +215,24 @@ bool m68000_device::is_native_opcode(u16 opword)
 	// btst #n,(xxx).W : 0x0838  /  btst #n,(xxx).L : 0x0839  (mask 0xfffe matches both)
 	if((opword & 0xfffe) == 0x0838)
 		return true;
+	// O-mem-2: btst/bchg/bclr/bset #n,(An)/(An)+/-(An)  (mask 0xfff8)
+	switch(opword & 0xfff8)
+	{
+	case 0x0810: case 0x0818: case 0x0820:   // btst #n
+	case 0x0850: case 0x0858: case 0x0860:   // bchg #n
+	case 0x0890: case 0x0898: case 0x08a0:   // bclr #n
+	case 0x08d0: case 0x08d8: case 0x08e0:   // bset #n
+		return true;
+	}
+	// O-mem-2: btst/bchg/bclr/bset Dn,(An)/(An)+/-(An)  (mask 0xf1f8)
+	switch(opword & 0xf1f8)
+	{
+	case 0x0110: case 0x0118: case 0x0120:   // btst Dn
+	case 0x0150: case 0x0158: case 0x0160:   // bchg Dn
+	case 0x0190: case 0x0198: case 0x01a0:   // bclr Dn
+	case 0x01d0: case 0x01d8: case 0x01e0:   // bset Dn
+		return true;
+	}
 	return false;
 }
 
@@ -256,6 +277,55 @@ void m68000_device::generate_native_dispatch(drcuml_block &block, uml::code_labe
 		UML_JMP(block, lbl_delegate);                               // fully-granted path: retired -> hand the timing tail to the interpreter
 		UML_LABEL(block, lbl_not_btst_abs);
 		m_drc_native_mem_ea_arms++;                                 // emission probe (Task 7)
+	}
+
+	// O-mem-2: btst/bchg/bclr/bset (An)/(An)+/-(An), #imm8 and Dn source -- native
+	// ONLY behind the space-topology gate (ADR 0007 Addendum; W6).  Each arm calls
+	// the generic emitter with its form constants; the bus-step run (substates /
+	// charges / pre_charge) is single-sourced from the generator.  The #imm8 forms
+	// (mask 0xfff8) and Dn forms (mask 0xf1f8) are disjoint on the EA-mode field and
+	// never collide with the btst-absolute arm above (0x0838/0x0839).
+	if (drc_native_mem_ea_allowed())
+	{
+		static const bitop_form k_forms[] = {
+			// #imm8 source (mask 0xfff8)
+			{ 0x0810, 0xfff8, BITOP_BTST, BITEA_AIS,  BITSRC_IMM8 },
+			{ 0x0818, 0xfff8, BITOP_BTST, BITEA_AIPS, BITSRC_IMM8 },
+			{ 0x0820, 0xfff8, BITOP_BTST, BITEA_PAIS, BITSRC_IMM8 },
+			{ 0x0850, 0xfff8, BITOP_BCHG, BITEA_AIS,  BITSRC_IMM8 },
+			{ 0x0858, 0xfff8, BITOP_BCHG, BITEA_AIPS, BITSRC_IMM8 },
+			{ 0x0860, 0xfff8, BITOP_BCHG, BITEA_PAIS, BITSRC_IMM8 },
+			{ 0x0890, 0xfff8, BITOP_BCLR, BITEA_AIS,  BITSRC_IMM8 },
+			{ 0x0898, 0xfff8, BITOP_BCLR, BITEA_AIPS, BITSRC_IMM8 },
+			{ 0x08a0, 0xfff8, BITOP_BCLR, BITEA_PAIS, BITSRC_IMM8 },
+			{ 0x08d0, 0xfff8, BITOP_BSET, BITEA_AIS,  BITSRC_IMM8 },
+			{ 0x08d8, 0xfff8, BITOP_BSET, BITEA_AIPS, BITSRC_IMM8 },
+			{ 0x08e0, 0xfff8, BITOP_BSET, BITEA_PAIS, BITSRC_IMM8 },
+			// Dn source (mask 0xf1f8)
+			{ 0x0110, 0xf1f8, BITOP_BTST, BITEA_AIS,  BITSRC_DN },
+			{ 0x0118, 0xf1f8, BITOP_BTST, BITEA_AIPS, BITSRC_DN },
+			{ 0x0120, 0xf1f8, BITOP_BTST, BITEA_PAIS, BITSRC_DN },
+			{ 0x0150, 0xf1f8, BITOP_BCHG, BITEA_AIS,  BITSRC_DN },
+			{ 0x0158, 0xf1f8, BITOP_BCHG, BITEA_AIPS, BITSRC_DN },
+			{ 0x0160, 0xf1f8, BITOP_BCHG, BITEA_PAIS, BITSRC_DN },
+			{ 0x0190, 0xf1f8, BITOP_BCLR, BITEA_AIS,  BITSRC_DN },
+			{ 0x0198, 0xf1f8, BITOP_BCLR, BITEA_AIPS, BITSRC_DN },
+			{ 0x01a0, 0xf1f8, BITOP_BCLR, BITEA_PAIS, BITSRC_DN },
+			{ 0x01d0, 0xf1f8, BITOP_BSET, BITEA_AIS,  BITSRC_DN },
+			{ 0x01d8, 0xf1f8, BITOP_BSET, BITEA_AIPS, BITSRC_DN },
+			{ 0x01e0, 0xf1f8, BITOP_BSET, BITEA_PAIS, BITSRC_DN },
+		};
+		for(const bitop_form &f : k_forms)
+		{
+			uml::code_label const lbl_next = m_drc_labelnum++;
+			UML_AND(block, I0, I7, f.mask);
+			UML_CMP(block, I0, f.value);
+			UML_JMPc(block, COND_NE, lbl_next);                     // not this form -> next test
+			generate_bitop_mem(block, f, lbl_delegate);            // emit the form (suspend yields JMP lbl_delegate from within)
+			UML_JMP(block, lbl_delegate);                          // fully-granted: retired -> hand the tail to the interpreter
+			UML_LABEL(block, lbl_next);
+			m_drc_native_mem_ea_arms++;                            // emission probe (gate test)
+		}
 	}
 
 	// (more native opcodes are added here in boundary O, each ending in
@@ -347,15 +417,21 @@ void m68000_device::generate_moveq(drcuml_block &block)
 
 //-------------------------------------------------
 //  generate_bus_step - emit ONE native 68000 bus
-//  read step: UML_READ + the interpreter's exact
-//  per-bus-cycle checkpoint (charge, two-way
-//  suspend, address-error).  The CALLER has already
-//  emitted the step's address / m_base_ssw setup.
-//  On suspend or fault this stores the descriptor's
-//  substate (or S_ADDRESS_ERROR) and JMPs to
-//  lbl_delegate (yield -> interpreter resumes, OQ-1).
-//  On the clean path it falls through with the read
-//  byte/word committed.  Clobbers I0-I6; preserves I7.
+//  access step (read OR write, by step.kind) +
+//  the interpreter's exact per-bus-cycle checkpoint
+//  (charge, two-way suspend, address-error).  A
+//  read does UML_READ (+ byte-lane select, m_edb
+//  commit); a DATA_WRITE does UML_WRITEM (masked
+//  word write of m_dbout, no m_edb commit, no
+//  address-error -- ADR 0007 W1).  An optional
+//  step.pre_charge (the -(An) predecrement -2) is
+//  charged first with NO checkpoint.  The CALLER has
+//  already emitted the step's address / m_dbout /
+//  m_base_ssw setup.  On suspend or fault this stores
+//  the descriptor's substate (or S_ADDRESS_ERROR) and
+//  JMPs to lbl_delegate (yield -> interpreter resumes,
+//  OQ-1).  On the clean path it falls through.
+//  Clobbers I0-I6; preserves I7.
 //-------------------------------------------------
 
 void m68000_device::generate_bus_step(drcuml_block &block, const struct drc_bus_step &step, uml::code_label lbl_delegate)
@@ -364,32 +440,66 @@ void m68000_device::generate_bus_step(drcuml_block &block, const struct drc_bus_
 	uml::code_label const lbl_completed     = m_drc_labelnum++;
 	uml::code_label const lbl_no_fault      = m_drc_labelnum++;
 
-	// address = m_aob & ~1  (the interpreter reads the word at the even address)
+	// predecrement internal micro-charge (-(An)): charged with NO suspend
+	// checkpoint, exactly as the interpreter's pdcw1 'm_icount -= 2;' (W2/W5).
+	// The descriptor folds it onto the following data-read/write step; 0 otherwise.
+	if(step.pre_charge)
+	{
+		UML_LOAD(block, I3, &m_icount, 0, SIZE_DWORD, SCALE_x1);
+		UML_SUB(block, I3, I3, step.pre_charge);
+		UML_STORE(block, &m_icount, 0, I3, SIZE_DWORD, SCALE_x1);
+	}
+
+	// address = m_aob & ~1  (the interpreter accesses the word at the even address)
 	UML_LOAD(block, I1, &m_aob, 0, SIZE_DWORD, SCALE_x1);            // i1 = m_aob
 	UML_AND(block, I2, I1, ~u32(1));                                 // i2 = m_aob & ~1
 
-	// THE READ.  Both prefetch and data reads go through SPACE_PROGRAM (the
-	// 68000 has one program space; the SSW_PROGRAM/SSW_DATA difference is an
-	// architectural field the caller wrote, not a UML space selection).  Read
-	// the word; the data read then selects a byte lane.
-	UML_READ(block, I0, I2, SIZE_WORD, SPACE_PROGRAM);              // i0 = read word at (m_aob & ~1)
-
-	if(step.byte_lane)
+	// THE ACCESS.  Both prefetch and data reads, and the data write, go through
+	// SPACE_PROGRAM (the 68000 has one program space under the gate; the
+	// SSW_PROGRAM/SSW_DATA difference is an architectural field the caller wrote,
+	// not a UML space selection).  Branch on the descriptor's kind (ADR 0007 W1):
+	// the charge + suspend checkpoint below are shared; only the access op and the
+	// fault branch differ.
+	if(step.kind == DRC_BUS_DATA_WRITE)
 	{
-		// m_edb = read; if(!(m_aob & 1)) m_edb >>= 8; then keep the low byte.
-		// (m_aob&1 ? low byte : high byte) -- matches the interpreter's lane mask
-		// 0x00ff/0xff00 + the ">>8 when even" select.
-		uml::code_label const lbl_odd = m_drc_labelnum++;
+		// WRITE: m_program.write_interruptible(m_aob & ~1, m_dbout, (m_aob&1)?0x00ff:0xff00)
+		// The CALLER has already done set_8xl(m_dbout, modified) and m_base_ssw =
+		// SSW_DATA.  UML_WRITEM is a masked word write at the even address mirroring
+		// the interpreter (a SIZE_BYTE write at the byte address would present a
+		// different bus shape -- W1: do NOT decompose).  No m_edb commit, no
+		// address-error branch (has_addr_error == 0 for writes).
+		uml::code_label const lbl_mask_done = m_drc_labelnum++;
 		UML_TEST(block, I1, 1);                                     // m_aob & 1 ?
-		UML_JMPc(block, COND_NZ, lbl_odd);                          // odd -> low byte already in place
-			UML_SHR(block, I0, I0, 8);                              // even -> high byte to low
-		UML_LABEL(block, lbl_odd);
-		UML_AND(block, I0, I0, 0xff);                               // keep the selected byte
+		UML_MOV(block, I4, u32(0xff00));                           // even -> high lane
+		UML_JMPc(block, COND_Z, lbl_mask_done);
+		UML_MOV(block, I4, u32(0x00ff));                           // odd -> low lane
+		UML_LABEL(block, lbl_mask_done);
+		UML_LOAD(block, I0, &m_dbout, 0, SIZE_WORD, SCALE_x1);     // i0 = m_dbout (replicated byte)
+		UML_WRITEM(block, I2, I0, I4, SIZE_WORD, SPACE_PROGRAM);   // masked word write, byte lane
 	}
+	else
+	{
+		// READ (unchanged from O-mem-1): read the word, then a data read selects a
+		// byte lane and commits m_edb.
+		UML_READ(block, I0, I2, SIZE_WORD, SPACE_PROGRAM);         // i0 = read word at (m_aob & ~1)
 
-	// commit the read into m_edb (the interpreter stores read result in m_edb).
-	// m_edb is u16 -> SIZE_WORD (a DWORD store would clobber the adjacent m_irc).
-	UML_STORE(block, &m_edb, 0, I0, SIZE_WORD, SCALE_x1);           // m_edb = read
+		if(step.byte_lane)
+		{
+			// m_edb = read; if(!(m_aob & 1)) m_edb >>= 8; then keep the low byte.
+			// (m_aob&1 ? low byte : high byte) -- matches the interpreter's lane mask
+			// 0x00ff/0xff00 + the ">>8 when even" select.
+			uml::code_label const lbl_odd = m_drc_labelnum++;
+			UML_TEST(block, I1, 1);                                 // m_aob & 1 ?
+			UML_JMPc(block, COND_NZ, lbl_odd);                      // odd -> low byte already in place
+				UML_SHR(block, I0, I0, 8);                          // even -> high byte to low
+			UML_LABEL(block, lbl_odd);
+			UML_AND(block, I0, I0, 0xff);                           // keep the selected byte
+		}
+
+		// commit the read into m_edb (the interpreter stores read result in m_edb).
+		// m_edb is u16 -> SIZE_WORD (a DWORD store would clobber the adjacent m_irc).
+		UML_STORE(block, &m_edb, 0, I0, SIZE_WORD, SCALE_x1);       // m_edb = read
+	}
 
 	// m_icount -= charge
 	UML_LOAD(block, I3, &m_icount, 0, SIZE_DWORD, SCALE_x1);        // i3 = m_icount
@@ -672,4 +782,280 @@ void m68000_device::generate_btst_imm8_absolute(drcuml_block &block, uml::code_l
 	}
 
 	UML_LABEL(block, lbl_done);
+}
+
+
+//-------------------------------------------------
+//  generate_bitop_mem - native UML for
+//  btst/bchg/bclr/bset #n|Dn,(An)/(An)+/-(An)  (O-mem-2, 24 forms)
+//
+//  Mirrors the *_df handlers in m68000-sdf.cpp (e.g. bchg_imm8_ais_df:20703,
+//  bchg_dd_ais_df:6770, btst_imm8_ais_df:19582, bchg_imm8_pais_df:20910).
+//  One parameterized emitter; family/EA/source are compile-time constants.
+//    RMW shape:  [#imm8] ext-fetch -> EA setup + m_dcr -> data read ->
+//                modify+refill prefetch -> data WRITE -> retire
+//    btst shape: [#imm8] ext-fetch -> EA setup + m_dcr -> data read ->
+//                Z(from data) -> final prefetch -> retire   (read-only)
+//  The bit number m_dcr is m_dt (#imm8) or m_da[rx] (Dn, rx=(m_ird>>9)&7).
+//  Z is taken from the ORIGINAL byte: at the write step from m_alub for RMW
+//  (matching the interpreter's bcsm2 ordering -- memory gets the post-op byte,
+//  Z reflects the bit as tested), or from m_dbin at the final prefetch for btst.
+//  EA arithmetic uses the A7-byte-by-2 rule; the -(An) predecrement internal -2
+//  is folded into the data-read step's pre_charge by the generator (Task 1), so
+//  it is NOT charged here.  Substates/charges come from the generated run --
+//  never hard-coded.  I7 holds m_ird (preserved across generate_bus_step).
+//
+//  ry = map_sp((m_ird & 7) | 8) is parked in I6 across the EA setup only; the
+//  only post-setup m_da[ry] writes (the (An)+/-(An) writeback) happen BEFORE the
+//  first generate_bus_step, so ry is never needed across a clobbering bus step.
+//-------------------------------------------------
+
+void m68000_device::generate_bitop_mem(drcuml_block &block, const struct bitop_form &form, uml::code_label lbl_delegate)
+{
+	// locate this form's generated bus-step run by {value, mask}.  value alone is
+	// ambiguous (the Dn forms share low bits), so match BOTH.
+	auto find_run = [](u16 value, u16 mask) -> const drc_bus_run & {
+		for(const drc_bus_run &r : s_drc_bus_run_table)
+			if(r.value == value && r.mask == mask)
+				return r;
+		return s_drc_bus_run_table[0]; // unreachable for the wired opcodes
+	};
+	const drc_bus_run &run = find_run(form.value, form.mask);
+	u16 si = run.first;   // running index into s_drc_bus_step_table for THIS run
+
+	const bool is_rmw = (form.family != BITOP_BTST);
+
+	// m_base_ssw = SSW_PROGRAM | SSW_R
+	auto ssw_program = [&]() {
+		UML_MOV(block, I0, u32(u16(SSW_PROGRAM | SSW_R)));
+		UML_STORE(block, &m_base_ssw, 0, I0, SIZE_WORD, SCALE_x1);
+	};
+	// m_irc = m_edb; m_dbin = m_edb;
+	auto commit_irc_dbin = [&]() {
+		UML_LOAD(block, I0, &m_edb, 0, SIZE_WORD, SCALE_x1);
+		UML_STORE(block, &m_irc, 0, I0, SIZE_WORD, SCALE_x1);
+		UML_STORE(block, &m_dbin, 0, I0, SIZE_WORD, SCALE_x1);
+	};
+	// m_dbin = m_edb;
+	auto commit_dbin = [&]() {
+		UML_LOAD(block, I0, &m_edb, 0, SIZE_WORD, SCALE_x1);
+		UML_STORE(block, &m_dbin, 0, I0, SIZE_WORD, SCALE_x1);
+	};
+	// ry = map_sp((m_ird & 7) | 8) -> I6 : if (m_ird & 7) == 7 use m_sp, else |8.
+	auto load_ry = [&]() {
+		uml::code_label const lbl_a7 = m_drc_labelnum++;
+		uml::code_label const lbl_ry_done = m_drc_labelnum++;
+		UML_AND(block, I6, I7, 7);                                    // i6 = m_ird & 7
+		UML_CMP(block, I6, 7);
+		UML_JMPc(block, COND_E, lbl_a7);
+			UML_OR(block, I6, I6, 8);                                 // A0..A6 -> (m_ird & 7) | 8
+			UML_JMP(block, lbl_ry_done);
+		UML_LABEL(block, lbl_a7);
+			UML_LOAD(block, I6, &m_sp, 0, SIZE_DWORD, SCALE_x1);      // A7 -> m_sp (15 or 16)
+		UML_LABEL(block, lbl_ry_done);
+	};
+	// delta = (ry < 15 ? 1 : 2) -> Id : byte access adjusts (A7)+/-(A7) by 2.
+	auto load_delta = [&](uml::parameter Id) {
+		uml::code_label const lbl_two = m_drc_labelnum++;
+		uml::code_label const lbl_d_done = m_drc_labelnum++;
+		UML_CMP(block, I6, 15);
+		UML_JMPc(block, COND_GE, lbl_two);                           // ry >= 15 (A7 bank) -> 2
+			UML_MOV(block, Id, 1);
+			UML_JMP(block, lbl_d_done);
+		UML_LABEL(block, lbl_two);
+			UML_MOV(block, Id, 2);
+		UML_LABEL(block, lbl_d_done);
+	};
+	// final-prefetch (btsm1) setup : m_aob=m_au; m_ir=m_irc; m_pc=m_au; m_au+=2;
+	//   m_ird=m_ir; if(next_state!=S_TRACE) next_state=int_next_state; SSW_PROGRAM
+	auto setup_final_prefetch = [&]() {
+		UML_LOAD(block, I0, &m_au, 0, SIZE_DWORD, SCALE_x1);
+		UML_STORE(block, &m_aob, 0, I0, SIZE_DWORD, SCALE_x1);        // m_aob = m_au
+		UML_STORE(block, &m_pc, 0, I0, SIZE_DWORD, SCALE_x1);         // m_pc = m_au
+		UML_ADD(block, I1, I0, 2);
+		UML_STORE(block, &m_au, 0, I1, SIZE_DWORD, SCALE_x1);         // m_au += 2
+		UML_LOAD(block, I2, &m_irc, 0, SIZE_WORD, SCALE_x1);
+		UML_STORE(block, &m_ir, 0, I2, SIZE_WORD, SCALE_x1);          // m_ir = m_irc
+		UML_STORE(block, &m_ird, 0, I2, SIZE_WORD, SCALE_x1);         // m_ird = m_ir
+		UML_LOAD(block, I3, &m_next_state, 0, SIZE_DWORD, SCALE_x1);
+		UML_LOAD(block, I4, &m_int_next_state, 0, SIZE_DWORD, SCALE_x1);
+		UML_CMP(block, I3, u32(S_TRACE));
+		UML_MOVc(block, COND_NE, I3, I4);
+		UML_STORE(block, &m_next_state, 0, I3, SIZE_DWORD, SCALE_x1);
+		ssw_program();
+	};
+	// retire : set_ftu_const(); m_inst_state = next_state ?: decode_table[m_ird];
+	//   if(m_sr & SR_T) m_next_state = S_TRACE.  (No m_irc/m_dbin commit -- btst
+	//   commits the final-prefetch word separately; RMW already committed at refill.)
+	auto retire = [&]() {
+		UML_CALLC(block, &m68000_device::cfunc_set_ftu_const, this);  // single-sourced
+		uml::code_label const lbl_have_next = m_drc_labelnum++;
+		UML_LOAD(block, I0, &m_next_state, 0, SIZE_DWORD, SCALE_x1);
+		UML_CMP(block, I0, 0);
+		UML_JMPc(block, COND_NE, lbl_have_next);
+			UML_LOAD(block, I1, &m_ird, 0, SIZE_WORD, SCALE_x1);
+			UML_LOAD(block, I0, m_decode_table.data(), I1, SIZE_WORD, SCALE_x2);
+		UML_LABEL(block, lbl_have_next);
+		UML_STORE(block, &m_inst_state, 0, I0, SIZE_WORD, SCALE_x1);
+		uml::code_label const lbl_no_trace = m_drc_labelnum++;
+		UML_LOAD(block, I2, &m_sr, 0, SIZE_WORD, SCALE_x1);
+		UML_TEST(block, I2, u32(u16(SR_T)));
+		UML_JMPc(block, COND_Z, lbl_no_trace);
+			UML_MOV(block, I3, u32(S_TRACE));
+			UML_STORE(block, &m_next_state, 0, I3, SIZE_DWORD, SCALE_x1);
+		UML_LABEL(block, lbl_no_trace);
+	};
+	// Z = !(byte & (1 << (m_dcr & 7))); set into SR.Z.  byte = m_dbin (btst) or
+	// m_alub (RMW original).  N/V/C/X untouched.
+	auto compute_z = [&](u16 *src_byte) {
+		UML_LOAD(block, I0, &m_dcr, 0, SIZE_BYTE, SCALE_x1);
+		UML_AND(block, I0, I0, 7);
+		UML_MOV(block, I1, 1);
+		UML_SHL(block, I1, I1, I0);                                   // i1 = 1 << (m_dcr & 7)
+		UML_LOAD(block, I2, src_byte, 0, SIZE_WORD, SCALE_x1);        // i2 = tested byte
+		UML_AND(block, I2, I2, I1);                                   // tested bit
+		UML_LOAD(block, I3, &m_sr, 0, SIZE_WORD, SCALE_x1);
+		UML_AND(block, I3, I3, u32(u16(~SR_Z)));                      // clear Z
+		UML_CMP(block, I2, 0);
+		UML_SETc(block, COND_E, I4);                                  // Z = (bit == 0)
+		UML_SHL(block, I4, I4, 2);                                    // SR_Z = 0x04
+		UML_OR(block, I3, I3, I4);
+		UML_STORE(block, &m_sr, 0, I3, SIZE_WORD, SCALE_x1);          // m_sr = (m_sr & ~SR_Z) | Z
+	};
+
+	// ===== ext-fetch (o#w1), #imm8 ONLY =====
+	// m_aob=m_au; m_pc=m_au; set_16l(m_dt,m_dbin); m_au+=2; SSW_PROGRAM; read; commit.
+	if(form.src == BITSRC_IMM8)
+	{
+		UML_LOAD(block, I0, &m_au, 0, SIZE_DWORD, SCALE_x1);
+		UML_STORE(block, &m_aob, 0, I0, SIZE_DWORD, SCALE_x1);
+		UML_STORE(block, &m_pc, 0, I0, SIZE_DWORD, SCALE_x1);
+		UML_ADD(block, I1, I0, 2);
+		UML_STORE(block, &m_au, 0, I1, SIZE_DWORD, SCALE_x1);
+		// set_16l(m_dt, m_dbin): m_dt = (m_dt & 0xffff0000) | (m_dbin & 0xffff)
+		UML_LOAD(block, I2, &m_dt, 0, SIZE_DWORD, SCALE_x1);
+		UML_AND(block, I2, I2, u32(0xffff0000));
+		UML_LOAD(block, I3, &m_dbin, 0, SIZE_WORD, SCALE_x1);
+		UML_OR(block, I2, I2, I3);
+		UML_STORE(block, &m_dt, 0, I2, SIZE_DWORD, SCALE_x1);
+		ssw_program();
+		generate_bus_step(block, s_drc_bus_step_table[si++], lbl_delegate);   // ext read
+		commit_irc_dbin();
+	}
+
+	// ===== EA setup (m_aob/m_at, reg writeback) + bit number m_dcr =====
+	load_ry();
+	switch(form.ea)
+	{
+	case BITEA_AIS:   // (An): m_aob = m_at = m_da[ry]
+		UML_LOAD(block, I0, &m_da[0], I6, SIZE_DWORD, SCALE_x4);
+		UML_STORE(block, &m_aob, 0, I0, SIZE_DWORD, SCALE_x1);
+		UML_STORE(block, &m_at, 0, I0, SIZE_DWORD, SCALE_x1);
+		break;
+	case BITEA_AIPS:  // (An)+: m_aob = m_at = m_da[ry] (old); m_da[ry] = old + delta
+		UML_LOAD(block, I0, &m_da[0], I6, SIZE_DWORD, SCALE_x4);
+		UML_STORE(block, &m_aob, 0, I0, SIZE_DWORD, SCALE_x1);
+		UML_STORE(block, &m_at, 0, I0, SIZE_DWORD, SCALE_x1);
+		load_delta(I1);
+		UML_ADD(block, I2, I0, I1);
+		UML_STORE(block, &m_da[0], I6, I2, SIZE_DWORD, SCALE_x4);     // post-increment
+		break;
+	case BITEA_PAIS:  // -(An): m_aob = m_at = m_da[ry] = m_da[ry] - delta
+		UML_LOAD(block, I0, &m_da[0], I6, SIZE_DWORD, SCALE_x4);
+		load_delta(I1);
+		UML_SUB(block, I2, I0, I1);
+		UML_STORE(block, &m_aob, 0, I2, SIZE_DWORD, SCALE_x1);
+		UML_STORE(block, &m_at, 0, I2, SIZE_DWORD, SCALE_x1);
+		UML_STORE(block, &m_da[0], I6, I2, SIZE_DWORD, SCALE_x4);     // pre-decrement
+		break;
+	}
+	// bit number -> m_dcr: #imm8 = m_dt; Dn = m_da[rx], rx = (m_ird >> 9) & 7
+	if(form.src == BITSRC_IMM8)
+	{
+		UML_LOAD(block, I0, &m_dt, 0, SIZE_DWORD, SCALE_x1);
+		UML_STORE(block, &m_dcr, 0, I0, SIZE_BYTE, SCALE_x1);
+	}
+	else
+	{
+		UML_SHR(block, I0, I7, 9);
+		UML_AND(block, I0, I0, 7);                                    // i0 = rx
+		UML_LOAD(block, I1, &m_da[0], I0, SIZE_DWORD, SCALE_x4);      // i1 = m_da[rx]
+		UML_STORE(block, &m_dcr, 0, I1, SIZE_BYTE, SCALE_x1);
+	}
+	// data-read SSW: m_base_ssw = SSW_DATA | SSW_R
+	UML_MOV(block, I0, u32(u16(SSW_DATA | SSW_R)));
+	UML_STORE(block, &m_base_ssw, 0, I0, SIZE_WORD, SCALE_x1);
+
+	// ===== data read (byte-lane; descriptor carries the -(An) predecrement pre_charge) =====
+	generate_bus_step(block, s_drc_bus_step_table[si++], lbl_delegate);
+	commit_dbin();   // m_dbin = ORIGINAL byte
+
+	if(!is_rmw)
+	{
+		// ===== btst: Z from the data byte, final prefetch, retire (no write) =====
+		compute_z(&m_dbin);
+		setup_final_prefetch();
+		generate_bus_step(block, s_drc_bus_step_table[si++], lbl_delegate);   // final prefetch
+		commit_irc_dbin();                                                    // commit the prefetch word
+		retire();
+		return;
+	}
+
+	// ===== RMW: modify + refill prefetch (bcsm1) =====
+	// m_alub = original byte (Z source); compute the modified byte; set_8xl(m_dbout).
+	UML_LOAD(block, I0, &m_dbin, 0, SIZE_WORD, SCALE_x1);             // i0 = original byte
+	UML_STORE(block, &m_alub, 0, I0, SIZE_WORD, SCALE_x1);            // m_alub = original
+	UML_LOAD(block, I1, &m_dcr, 0, SIZE_BYTE, SCALE_x1);
+	UML_AND(block, I1, I1, 7);
+	UML_MOV(block, I2, 1);
+	UML_SHL(block, I2, I2, I1);                                       // i2 = 1 << (m_dcr & 7)
+	switch(form.family)
+	{
+	case BITOP_BCHG: UML_XOR(block, I0, I0, I2); break;                                       // original ^ bit
+	case BITOP_BCLR: UML_XOR(block, I2, I2, u32(0xff)); UML_AND(block, I0, I0, I2); break;    // original & ~bit
+	case BITOP_BSET: UML_OR (block, I0, I0, I2); break;                                       // original | bit
+	default: break; // unreachable (btst handled above)
+	}
+	UML_AND(block, I0, I0, 0xff);                                     // modified byte (8 bits)
+	// m_aluo = modified byte: the interpreter's bcsm1 ALU op (alu_eor8/alu_or8/...)
+	// writes m_aluo, and the bcsm2 partial handler recomputes m_dbout via
+	// set_8xl(m_dbout, m_aluo).  If this native modify+refill state suspends at the
+	// refill prefetch (a mid-budget grant), the interpreter resumes at bcsm2 and would
+	// otherwise replicate a STALE m_aluo over our m_dbout -> wrong byte written.  Keep
+	// m_aluo in sync so the resumed write is identical (caught by the partial-grant pass).
+	UML_STORE(block, &m_aluo, 0, I0, SIZE_WORD, SCALE_x1);            // m_aluo = modified byte (bcsm1 parity)
+	// set_8xl(m_dbout, modified) = (modified & 0x00ff) | (modified << 8)
+	UML_SHL(block, I1, I0, 8);
+	UML_OR(block, I0, I0, I1);
+	UML_STORE(block, &m_dbout, 0, I0, SIZE_WORD, SCALE_x1);           // m_dbout = replicated modified byte
+	// bcsm1 prefetch setup: m_aob=m_au; m_ir=m_irc; m_pc=m_au; m_au+=2; SSW_PROGRAM
+	UML_LOAD(block, I3, &m_au, 0, SIZE_DWORD, SCALE_x1);
+	UML_STORE(block, &m_aob, 0, I3, SIZE_DWORD, SCALE_x1);
+	UML_STORE(block, &m_pc, 0, I3, SIZE_DWORD, SCALE_x1);
+	UML_LOAD(block, I4, &m_irc, 0, SIZE_WORD, SCALE_x1);
+	UML_STORE(block, &m_ir, 0, I4, SIZE_WORD, SCALE_x1);
+	UML_ADD(block, I3, I3, 2);
+	UML_STORE(block, &m_au, 0, I3, SIZE_DWORD, SCALE_x1);
+	ssw_program();
+	generate_bus_step(block, s_drc_bus_step_table[si++], lbl_delegate);   // refill prefetch
+	commit_irc_dbin();   // m_dbin <- prefetch word (original safe in m_alub/m_dbout)
+
+	// ===== data write (bcsm2) =====
+	// m_aob=m_at; m_ird=m_ir; next_state; (m_dbout already set); Z from m_alub; SSW_DATA; WRITE.
+	UML_LOAD(block, I0, &m_at, 0, SIZE_DWORD, SCALE_x1);
+	UML_STORE(block, &m_aob, 0, I0, SIZE_DWORD, SCALE_x1);            // m_aob = m_at (read-validated EA)
+	UML_LOAD(block, I1, &m_ir, 0, SIZE_WORD, SCALE_x1);
+	UML_STORE(block, &m_ird, 0, I1, SIZE_WORD, SCALE_x1);            // m_ird = m_ir
+	UML_LOAD(block, I2, &m_next_state, 0, SIZE_DWORD, SCALE_x1);
+	UML_LOAD(block, I3, &m_int_next_state, 0, SIZE_DWORD, SCALE_x1);
+	UML_CMP(block, I2, u32(S_TRACE));
+	UML_MOVc(block, COND_NE, I2, I3);
+	UML_STORE(block, &m_next_state, 0, I2, SIZE_DWORD, SCALE_x1);
+	compute_z(&m_alub);                                              // Z from the ORIGINAL byte
+	UML_MOV(block, I0, u32(u16(SSW_DATA)));                          // SSW_DATA only (write: R clear)
+	UML_STORE(block, &m_base_ssw, 0, I0, SIZE_WORD, SCALE_x1);
+	generate_bus_step(block, s_drc_bus_step_table[si++], lbl_delegate);   // DATA WRITE
+
+	// ===== retire =====
+	retire();
 }
