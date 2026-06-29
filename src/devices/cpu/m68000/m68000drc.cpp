@@ -1017,6 +1017,13 @@ void m68000_device::generate_bitop_mem(drcuml_block &block, const struct bitop_f
 	default: break; // unreachable (btst handled above)
 	}
 	UML_AND(block, I0, I0, 0xff);                                     // modified byte (8 bits)
+	// m_aluo = modified byte: the interpreter's bcsm1 ALU op (alu_eor8/alu_or8/...)
+	// writes m_aluo, and the bcsm2 partial handler recomputes m_dbout via
+	// set_8xl(m_dbout, m_aluo).  If this native modify+refill state suspends at the
+	// refill prefetch (a mid-budget grant), the interpreter resumes at bcsm2 and would
+	// otherwise replicate a STALE m_aluo over our m_dbout -> wrong byte written.  Keep
+	// m_aluo in sync so the resumed write is identical (caught by the partial-grant pass).
+	UML_STORE(block, &m_aluo, 0, I0, SIZE_WORD, SCALE_x1);            // m_aluo = modified byte (bcsm1 parity)
 	// set_8xl(m_dbout, modified) = (modified & 0x00ff) | (modified << 8)
 	UML_SHL(block, I1, I0, 8);
 	UML_OR(block, I0, I0, I1);

@@ -395,7 +395,20 @@ public:
 		// env (alongside CPUORACLE_M68_DRC_C).  When unset, behaviour is the legacy
 		// 1-cycle-per-iteration stepping (validates native step 1 + the suspend handoff).
 		static const bool s_full_grant = (std::getenv("CPUORACLE_M68_DRC_FULLGRANT") != nullptr);
-		const int first_grant = s_full_grant ? (budget > 0 ? budget : 1) : 1;
+		// Partial-grant pass (mid-instruction suspend coverage): grant length-4 so a
+		// multi-step native opcode runs all but its LAST bus access, then SUSPENDS one
+		// access before the end and the interpreter resumes from there.  For an RMW
+		// bit-op this suspends at the refill prefetch and resumes at the write step
+		// (bcsm2) in the interpreter -- exercising that the native modify+refill state
+		// left EVERY field the resumed write reads (incl. m_aluo) interpreter-equivalent.
+		// (The full-grant pass only ever suspends at the LAST access; the 1-cycle pass
+		// only at the FIRST -- neither reaches a mid-instruction resume.)
+		static const bool s_part_grant = (std::getenv("CPUORACLE_M68_DRC_PARTGRANT") != nullptr);
+		int first_grant = 1;
+		if(s_full_grant)
+			first_grant = (budget > 0 ? budget : 1);
+		else if(s_part_grant)
+			first_grant = (budget > 4 ? budget - 4 : 1);
 
 		// The over-run carry must start clean so the first grant is not
 		// silently swallowed by a stale m_count_before_instruction_step from a

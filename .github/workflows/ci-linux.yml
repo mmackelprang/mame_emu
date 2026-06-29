@@ -130,6 +130,19 @@ jobs:
         CPUORACLE_M68_DRC_FULLGRANT: "1"
         CPUORACLE_M68_DRC_C: "1"
       run: ./mametests "[m68000][drc]"
+    # Partial-grant pass: suspends one bus access before the end so a multi-step
+    # native opcode resumes mid-instruction in the interpreter -- covers the
+    # native modify+refill -> interpreter write (bcsm2) handoff (m_aluo parity) that
+    # neither the 1-cycle (first-step) nor full-grant (last-step) pass can reach.
+    - name: Run m68000 DRC Leg B -- partial-grant pass (mid-instruction resume)
+      env:
+        CPUORACLE_M68_DRC_PARTGRANT: "1"
+      run: ./mametests "[m68000][drc]"
+    - name: Run m68000 DRC Leg B -- partial-grant C backend
+      env:
+        CPUORACLE_M68_DRC_PARTGRANT: "1"
+        CPUORACLE_M68_DRC_C: "1"
+      run: ./mametests "[m68000][drc]"
 
   # The heavy cross-compiler full-mame build matrix is GitHub-hosted only -- it is
   # about cross-compiler coverage the single appserver box can't replicate, and it
@@ -226,6 +239,17 @@ jobs:
       env:
         CPUORACLE_MAX_FILES: ${{ matrix.oracle_cap }}
         CPUORACLE_M68_DRC_FULLGRANT: "1"
+        CPUORACLE_M68_DRC_C: "1"
+      run: ./mametests "[m68000][drc]"
+    - name: Run m68000 DRC Leg B -- partial-grant pass (mid-instruction resume)
+      env:
+        CPUORACLE_MAX_FILES: ${{ matrix.oracle_cap }}
+        CPUORACLE_M68_DRC_PARTGRANT: "1"
+      run: ./mametests "[m68000][drc]"
+    - name: Run m68000 DRC Leg B -- partial-grant C backend
+      env:
+        CPUORACLE_MAX_FILES: ${{ matrix.oracle_cap }}
+        CPUORACLE_M68_DRC_PARTGRANT: "1"
         CPUORACLE_M68_DRC_C: "1"
       run: ./mametests "[m68000][drc]"
     - name: ORM check
