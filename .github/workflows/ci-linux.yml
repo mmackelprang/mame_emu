@@ -111,6 +111,25 @@ jobs:
       run: python3 tests/cpuoracle/fetch_vectors.py --cores z80,m6502,m68000
     - name: Run mametests (full oracle + legacy unit tests, no cap)
       run: ./mametests
+    # O-mem-2 (ADR 0007 W4): the default run above is the 1-cycle Leg B, which only
+    # exercises each native opcode's FIRST bus step.  The fully-granted pass grants
+    # the instruction's length so the WHOLE native instruction -- including the data
+    # WRITE -- runs native; it is a BLOCKING gate for the m68000 DRC memory-EA work.
+    # Also run the portable C backend (drcbec) to catch backend-divergent emission.
+    # Full corpus, no cap (this appserver job is the load-bearing correctness gate).
+    - name: Run m68000 DRC Leg B -- fully-granted pass (native write, ADR 0007 W4)
+      env:
+        CPUORACLE_M68_DRC_FULLGRANT: "1"
+      run: ./mametests "[m68000][drc]"
+    - name: Run m68000 DRC Leg B -- C backend (drcbec)
+      env:
+        CPUORACLE_M68_DRC_C: "1"
+      run: ./mametests "[m68000][drc]"
+    - name: Run m68000 DRC Leg B -- fully-granted C backend
+      env:
+        CPUORACLE_M68_DRC_FULLGRANT: "1"
+        CPUORACLE_M68_DRC_C: "1"
+      run: ./mametests "[m68000][drc]"
 
   # The heavy cross-compiler full-mame build matrix is GitHub-hosted only -- it is
   # about cross-compiler coverage the single appserver box can't replicate, and it
@@ -189,6 +208,26 @@ jobs:
       env:
         CPUORACLE_MAX_FILES: ${{ matrix.oracle_cap }}
       run: ./mametests
+    # O-mem-2 (ADR 0007 W4): the fully-granted Leg-B pass exercises the native
+    # multi-step path incl. the data WRITE (the 1-cycle pass cannot reach it); plus
+    # the portable C backend (drcbec).  Blocking gates on the GitHub-hosted path
+    # (mirrors the appserver `oracle` job above).  Uses the same per-leg corpus cap.
+    - name: Run m68000 DRC Leg B -- fully-granted pass (native write, ADR 0007 W4)
+      env:
+        CPUORACLE_MAX_FILES: ${{ matrix.oracle_cap }}
+        CPUORACLE_M68_DRC_FULLGRANT: "1"
+      run: ./mametests "[m68000][drc]"
+    - name: Run m68000 DRC Leg B -- C backend (drcbec)
+      env:
+        CPUORACLE_MAX_FILES: ${{ matrix.oracle_cap }}
+        CPUORACLE_M68_DRC_C: "1"
+      run: ./mametests "[m68000][drc]"
+    - name: Run m68000 DRC Leg B -- fully-granted C backend
+      env:
+        CPUORACLE_MAX_FILES: ${{ matrix.oracle_cap }}
+        CPUORACLE_M68_DRC_FULLGRANT: "1"
+        CPUORACLE_M68_DRC_C: "1"
+      run: ./mametests "[m68000][drc]"
     - name: ORM check
       run: python3 scripts/minimaws/minimaws.py load --executable ./${{ matrix.executable }} --softwarepath hash
     - uses: actions/upload-artifact@main
