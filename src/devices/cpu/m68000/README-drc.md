@@ -86,10 +86,12 @@ insensitive cycle cost and no fault surface in user mode:
   `btst #n,(xxx).W/.L`, native as of O-mem-1, and `btst`/`bchg`/`bclr`/`bset` `#n`\|`Dn`,`(An)`/`(An)+`/`-(An)`,
   native as of O-mem-2 — all **on a flat-topology non-MMU bus only**), `tas`,
   and the `ccr` / `sr` / `usp` operand forms — all `cfunc_` in increment 1.
-- **Memory-EA `MOVE` / `MOVEA`** is `cfunc_` in increment 1 **except MOVEA `(An)`/`(An)+`/`-(An)`→`An`**
-  (`.w`+`.l`, 6 forms), native as of **O-mem-3a** on a flat-topology non-MMU bus
-  (`drc_native_mem_ea_allowed()`). `(d16,An)` MOVEA and all memory-EA `MOVE` (reg↔mem, mem→mem) remain
-  `cfunc_`, deferred to O-mem-3b…3e.
+- **Memory-EA `MOVE` / `MOVEA`** is `cfunc_` in increment 1 **except** (a) MOVEA `(An)`/`(An)+`/`-(An)`→`An`
+  (`.w`+`.l`, 6 forms), native as of **O-mem-3a**, and (b) single-access (`.b`+`.w`) `MOVE` **reg↔mem**
+  `(An)`/`(An)+`/`-(An)` (mem→Dn load, Dn→mem store, An→mem store; **15 forms**), native as of **O-mem-3b**
+  — both **on a flat-topology non-MMU bus only** (`drc_native_mem_ea_allowed()`). `(d16,An)` MOVE/MOVEA,
+  long `.l` reg↔mem, and mem→mem `MOVE` remain `cfunc_`, deferred to O-mem-3c (mem→mem) / O-mem-3d (`.l`) /
+  O-mem-3e (`(d16,An)`).
 
 ### Hard `cfunc_` boundaries (never native in increment 1, by category)
 
@@ -199,6 +201,7 @@ This document is updated when the native set changes (each coverage-widening inc
 | `btst #n,(xxx).W` / `.L` | O-mem-1 | Full native via `generate_bus_step()` — 4-read (.W) / 5-read (.L) interruptible-read sequence with per-bus-cycle charge, suspend checkpoint, and address-error branch; resume after a mid-instruction yield owned by the interpreter's partial handler (ADR 0007 OQ-1). **Native ONLY on a flat-topology, non-MMU bus (`drc_native_mem_ea_allowed()`): when a driver configures `AS_OPCODES` (decrypted opcodes, e.g. FD1094) / user spaces / an MMU the opcode stays `cfunc_` (ADR 0007 Addendum 2026-06-28).** |
 | `btst`/`bchg`/`bclr`/`bset` `#n`\|`Dn`,`(An)`/`(An)+`/`-(An)` | O-mem-2 | 24 forms (`btst`×6 read-only, `bchg`/`bclr`/`bset`×18 RMW). RMW via the **write-side** `generate_bus_step()` (`UML_WRITEM`, byte-lane mask, value from `m_dbout`); `btst` read-only. EA arithmetic with the A7-byte-by-2 rule and the `-(An)` predecrement internal `−2` (single-sourced as the descriptor's `pre_charge`); the bit is modified at the refill-prefetch state but **Z is set from the ORIGINAL byte** before the write. Substates/charges single-sourced from the generator. **Native ONLY on a flat-topology, non-MMU bus (`drc_native_mem_ea_allowed()`)** — `AS_OPCODES`/user-space/MMU machines stay `cfunc_` (ADR 0007 Addendum). The native data-write is validated by the fully-granted Leg-B oracle pass (ADR 0007 W4). |
 | `movea.w`/`movea.l` `(An)`/`(An)+`/`-(An)`,`An` | O-mem-3a | 6 forms. Source-EA read via the frozen `generate_bus_step()` read path (`byte_lane=0` word read, `has_addr_error=1`); **long = two-word read** (high then low) with the high word latched in `m_alue`. Dest is an **address register**: write-back is `ext32(m_dbin)` (`.w`) / `set_16h`+`set_16l` (`.l`) at the final-prefetch state. **No data-write step, no flags, no `generate_bus_step()` edit.** Decodes `rx`/`ry` from `m_irdi` (the emitter latches `m_irdi = m_ird` first so the interpreter's partial handler resumes correctly). The `-(An)` predecrement internal `−2` is single-sourced as the first read's `pre_charge`. **Native ONLY on a flat-topology, non-MMU bus (`drc_native_mem_ea_allowed()`)** — `AS_OPCODES`/user-space/MMU machines stay `cfunc_`. Validated by the 1-cycle (incl. the `m_irdi` resume), full-grant (the native latch + register write-back), and single-offset partial-grant Leg-B passes (ADR 0007 O-mem-3 addendum). `(d16,An)` MOVEA is deferred to O-mem-3e. |
+| `move.b`/`move.w` `(An)`/`(An)+`/`-(An)` reg↔mem | O-mem-3b | 15 forms (mem→Dn load 6, Dn→mem store 6, An→mem store 3 word). **Load:** source-EA read via the frozen `generate_bus_step()` (`.b` `byte_lane=1`/no-fault, `.w` `byte_lane=0`/fault); dest is a **data register** — write-back `set_8`/`set_16l` **preserves the unwritten half** (distinct from MOVEA's `ext32`); no data-write step. **Store:** the source register feeds `m_dbout` (`.w` low word; `.b` `set_8xl` replicate); the **word DATA WRITE** uses the one O-mem-3 `generate_bus_step()` primitive edit — `byte_lane==0` full-word `UML_WRITE` (byte store reuses O-mem-2's `byte_lane==1` masked path); the word write carries `has_addr_error=1` via the shared kind-agnostic fault branch. The **`-(An)` store is PREFETCH-first then DATA WRITE** (the reversed microcode order; `m_dbout` reconstructed from `m_aluo` in the write-setup so a mid-grant resume is exact). **MOVE flags** (`sr_nzvc`: N=MSB, Z=(value==0), V=C=0, X untouched) from the moved value (load: after the read; store: before/with the write). Decodes `rx`/`ry` from `m_irdi` (latched `m_irdi=m_ird`). Per-mode EA arithmetic incl. the byte `(A7)`=2 delta exception. **Native ONLY on a flat-topology, non-MMU bus (`drc_native_mem_ea_allowed()`)** — `AS_OPCODES`/user-space/MMU stay `cfunc_`. Validated by the 1-cycle, full-grant (the native word write + flags), and single-offset partial-grant Leg-B passes (x64 + C). `(d16,An)`→3e, `.l`→3d, mem→mem→3c. |
 
 ### Known limitations
 
@@ -231,3 +234,17 @@ This document is updated when the native set changes (each coverage-widening inc
   end-to-end, the 1-cycle pass exercises the interpreter-side handoff after read-high, and the `m_alue`
   latch is emitted *before* the read-low bus step (so a completed-suspend at read-low leaves it correct).
   OQ-10 is owner-decided (2026-06-28): accept this residual — **no parameterized partial-grant sweep**.
+- **The word `DATA WRITE` `byte_lane==0` full-word `UML_WRITE` is the single `generate_bus_step()` primitive
+  edit of the entire MOVE arc (O-mem-3b).** O-mem-3a touched `generate_bus_step()` not at all; O-mem-3c/3d/3e
+  reuse it frozen. The edit is reviewed in isolation (its own commit) with an oracle re-run proving the
+  `byte_lane==1` byte-write path is **byte-identical** (the O-mem-2 bit-op RMW oracle stays green under all
+  three grant modes). The word write carries `has_addr_error=1` via the **already kind-agnostic** shared
+  address-error branch — no write-specific fault branch was added.
+- **O-mem-3b `-(An)` store residual + retire (by-construction).** The `-(An)` store is PREFETCH-first then
+  DATA WRITE; its `m_dbout` is reconstructed from `m_aluo` in the post-prefetch write-setup, so `m_aluo` is
+  set *before* the prefetch bus step (a completed-suspend at the prefetch leaves the interpreter's `mmmw2`
+  resume able to recompute `m_dbout` identically). The single-offset partial-grant pass resumes at the
+  *second* access for every form; combined with the full-grant (whole instruction native) and 1-cycle
+  (interpreter-side handoff) passes this covers the between-access boundary by construction. The native
+  **retire** tail remains the one native residual not oracle-exercised (the snapshot model cannot reach an
+  overshoot; mirrors the validated `moveq`/`btst`/MOVEA tail).

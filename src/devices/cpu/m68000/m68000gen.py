@@ -2460,7 +2460,21 @@ def drc_bus_steps(ii):
     # READS (word/long source-EA read + final prefetch) with NO data-write row; the
     # long forms are two word reads (high then low) -- byte_lane=0, has_addr_error=1.
     is_o3a = (base == 'movea' and src_ea in REGIND and dst_ea == DRC_EA_AREG)
-    if not (is_o1 or is_o2 or is_o3a):
+    # O-mem-3b: single-access (.b+.w) MOVE reg<->mem (An)/(An)+/-(An), both directions
+    # (15 forms).  load (mem->Dn): base 'move', src in REGIND, dst == DRC_EA_DREG.
+    # store (reg->mem): base 'move', dst in REGIND, src in (DREG, AREG) -- Dn->mem and
+    # An->mem (An src has no .b handler, so byte An-store is naturally absent).  MOVEA
+    # is base 'movea' with dst == DRC_EA_AREG, a DIFFERENT dst than DREG/REGIND, so it
+    # cannot leak into is_o3b.  (d16,An) is DRC_EA_DISP (not in REGIND) -> 3e; long .l
+    # is DRC_SIZE_L -> 3d; both EXCLUDED by the clauses below.  These compose entirely
+    # from the existing read/write/prefetch step parsers (the word DATA WRITE comes out
+    # byte_lane=0 via the lane-mask-keyed width rule below) -- no MOVE-specific
+    # charge/substate/byte_lane logic is added (R-A single-source discipline).
+    sz3b = drc_size_for(ii)
+    is_o3b_load  = (base == 'move' and src_ea in REGIND and dst_ea == DRC_EA_DREG)
+    is_o3b_store = (base == 'move' and dst_ea in REGIND and src_ea in (DRC_EA_DREG, DRC_EA_AREG))
+    is_o3b = (is_o3b_load or is_o3b_store) and sz3b in (DRC_SIZE_B, DRC_SIZE_W)
+    if not (is_o1 or is_o2 or is_o3a or is_o3b):
         return []
 
     # Re-emit the interpreter handler body exactly as the 'sdf' command does.
@@ -2486,15 +2500,18 @@ def drc_bus_steps(ii):
             # for an m_opcodes read).  This drives the descriptor KIND only.
             is_data = is_write or line.startswith('m_edb = m_program.read_interruptible')
 
-            # WIDTH of the access (byte_lane / size) is independent of data-vs-prefetch.
-            # O-mem-3 adds the WORD data read (MOVEA / word MOVE): a bare
-            # 'm_program.read_interruptible(m_aob & ~1)' with NO 0x00ff/0xff00 lane mask
-            # -> full word, byte_lane=0, has_addr_error=1.  A byte data read carries the
-            # explicit lane mask (and a '>>= 8' select); the O-mem-2 RMW store is a byte
-            # write by construction (text has no mask, so force it via is_write).  Keying
-            # the width on the lane mask (not is_data) keeps the O-mem-1/2 rows
-            # byte-identical while MOVEA's word read comes out word-sized.
-            is_byte_lane = is_write or (is_read and ('0x00ff' in line or '0xff00' in line))
+            # WIDTH of the access (byte_lane / size) is keyed PURELY on the 0x00ff/0xff00
+            # lane mask in the access text, uniformly for reads AND writes:
+            #   masked text -> byte_lane=1 (O-mem-2 byte RMW read+write; O-mem-3b byte
+            #     load+store): a byte data read also carries a '>>= 8' lane select.
+            #   bare text   -> byte_lane=0 (MOVEA / word MOVE read; O-mem-3b WORD store):
+            #     full word, has_addr_error=1.
+            # O-mem-2's byte STORE carries the mask too (verified m68000-sdf.cpp:
+            # write_interruptible(..., (m_aob&1)?0x00ff:0xff00)), so dropping the old
+            # 'is_write -> byte_lane' force is byte-identical for every O-mem-1/2/3a row
+            # while O-mem-3b's WORD store (bare write_interruptible) now comes out
+            # byte_lane=0 -> the full-word UML_WRITE (the Task-1 primitive edit).
+            is_byte_lane = ('0x00ff' in line or '0xff00' in line)
 
             # The charge is the next 'm_icount -= N;' (skip the optional
             # 'if(!(m_aob & 1)) m_edb >>= 8;' byte-lane select on a data read).

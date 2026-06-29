@@ -1264,12 +1264,15 @@ TEST_CASE("CPU oracle m68000 Leg B -- separate AS_OPCODES (gate keeps cfunc_)", 
 		return;
 	}
 
-	// the native corpus subset = the opcodes O-mem-2 (bit-ops) + O-mem-3a (MOVEA) make
-	// native on a flat-topology bus.  On this separate-AS_OPCODES machine the gate is
-	// FALSE, so all of them must stay cfunc_ and the DRC must match the interpreter.
+	// the native corpus subset = the opcodes O-mem-2 (bit-ops) + O-mem-3a (MOVEA) +
+	// O-mem-3b (MOVE reg<->mem) make native on a flat-topology bus.  On this separate-
+	// AS_OPCODES machine the gate is FALSE, so all of them must stay cfunc_ and the DRC
+	// must match the interpreter.  MOVE.b/.w.json carry the 15 O-mem-3b reg<->mem forms
+	// (alongside the still-cfunc_ (d16,An)/absolute/mem->mem forms in the same file).
 	static const char *const k_bitop_files[] = {
 		"BCHG.json", "BCLR.json", "BSET.json", "BTST.json",
 		"MOVEA.w.json", "MOVEA.l.json",   // O-mem-3a: gate must keep MOVEA on cfunc_ here
+		"MOVE.b.json", "MOVE.w.json",     // O-mem-3b: gate must keep MOVE reg<->mem on cfunc_ here
 	};
 	std::vector<fs::path> fixtures;
 	for (const fs::path &p : all)
@@ -1565,6 +1568,39 @@ TEST_CASE("m68000 DRC native coverage -- 6 MOVEA memory-EA forms", "[cpu][m68000
 		CHECK_FALSE(h.is_native_opcode(0x2068));   // movea.l (d16,An),An  -> 3e
 		CHECK_FALSE(h.is_native_opcode(0x3040));   // movea.w Dn,An        (register source)
 		CHECK_FALSE(h.is_native_opcode(0x2048));   // movea.l An,An        (register source)
+	});
+	REQUIRE(ran);
+}
+
+// O-mem-3b: assert the 15 single-access MOVE reg<->mem (An)/(An)+/-(An) forms are
+// classified native by is_native_opcode(), and that the (d16,An) (3e), long .l (3d) and
+// mem->mem (3c) MOVE forms are NOT (so the predicate did not over-match at the boundary).
+TEST_CASE("m68000 DRC native coverage -- 15 MOVE reg<->mem memory-EA forms", "[cpu][m68000][drc][gate]")
+{
+	using namespace cpuoracle;
+	cpu_test_harness h(m68000_core_descriptor());
+	h.set_drc(true);
+	bool ran = h.run_with_machine([&]
+	{
+		REQUIRE(h.drc_engaged());
+		// the 15 O-mem-3b forms -- one representative encoding per form
+		static const std::uint16_t k_native[] = {
+			0x1010, 0x1018, 0x1020,  0x3010, 0x3018, 0x3020,   // move.b/.w (An)/(An)+/-(An),Dn  (load)
+			0x1080, 0x10c0, 0x1100,  0x3080, 0x30c0, 0x3100,   // move.b/.w Dn,(An)/(An)+/-(An)  (store)
+			0x3088, 0x30c8, 0x3108,                            // move.w An,(An)/(An)+/-(An)     (store, word)
+		};
+		for (std::uint16_t op : k_native)
+		{
+			INFO("opword " << std::hex << op);
+			CHECK(h.is_native_opcode(op));
+		}
+		// anti-vacuity / no-over-match at the 3b/3c/3d/3e boundary:
+		CHECK_FALSE(h.is_native_opcode(0x1028));   // move.b (d16,An),Dn   -> 3e
+		CHECK_FALSE(h.is_native_opcode(0x3028));   // move.w (d16,An),Dn   -> 3e
+		CHECK_FALSE(h.is_native_opcode(0x2010));   // move.l (An),Dn       -> 3d
+		CHECK_FALSE(h.is_native_opcode(0x2080));   // move.l Dn,(An)       -> 3d
+		CHECK_FALSE(h.is_native_opcode(0x3090));   // move.w (An),(An)     -> 3c (mem->mem)
+		CHECK_FALSE(h.is_native_opcode(0x1140));   // move.b Dn,(d16,An)   -> 3e (store dst (d16,An))
 	});
 	REQUIRE(ran);
 }
