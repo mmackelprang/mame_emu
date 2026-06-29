@@ -347,15 +347,21 @@ void m68000_device::generate_moveq(drcuml_block &block)
 
 //-------------------------------------------------
 //  generate_bus_step - emit ONE native 68000 bus
-//  read step: UML_READ + the interpreter's exact
-//  per-bus-cycle checkpoint (charge, two-way
-//  suspend, address-error).  The CALLER has already
-//  emitted the step's address / m_base_ssw setup.
-//  On suspend or fault this stores the descriptor's
-//  substate (or S_ADDRESS_ERROR) and JMPs to
-//  lbl_delegate (yield -> interpreter resumes, OQ-1).
-//  On the clean path it falls through with the read
-//  byte/word committed.  Clobbers I0-I6; preserves I7.
+//  access step (read OR write, by step.kind) +
+//  the interpreter's exact per-bus-cycle checkpoint
+//  (charge, two-way suspend, address-error).  A
+//  read does UML_READ (+ byte-lane select, m_edb
+//  commit); a DATA_WRITE does UML_WRITEM (masked
+//  word write of m_dbout, no m_edb commit, no
+//  address-error -- ADR 0007 W1).  An optional
+//  step.pre_charge (the -(An) predecrement -2) is
+//  charged first with NO checkpoint.  The CALLER has
+//  already emitted the step's address / m_dbout /
+//  m_base_ssw setup.  On suspend or fault this stores
+//  the descriptor's substate (or S_ADDRESS_ERROR) and
+//  JMPs to lbl_delegate (yield -> interpreter resumes,
+//  OQ-1).  On the clean path it falls through.
+//  Clobbers I0-I6; preserves I7.
 //-------------------------------------------------
 
 void m68000_device::generate_bus_step(drcuml_block &block, const struct drc_bus_step &step, uml::code_label lbl_delegate)
@@ -364,32 +370,66 @@ void m68000_device::generate_bus_step(drcuml_block &block, const struct drc_bus_
 	uml::code_label const lbl_completed     = m_drc_labelnum++;
 	uml::code_label const lbl_no_fault      = m_drc_labelnum++;
 
-	// address = m_aob & ~1  (the interpreter reads the word at the even address)
+	// predecrement internal micro-charge (-(An)): charged with NO suspend
+	// checkpoint, exactly as the interpreter's pdcw1 'm_icount -= 2;' (W2/W5).
+	// The descriptor folds it onto the following data-read/write step; 0 otherwise.
+	if(step.pre_charge)
+	{
+		UML_LOAD(block, I3, &m_icount, 0, SIZE_DWORD, SCALE_x1);
+		UML_SUB(block, I3, I3, step.pre_charge);
+		UML_STORE(block, &m_icount, 0, I3, SIZE_DWORD, SCALE_x1);
+	}
+
+	// address = m_aob & ~1  (the interpreter accesses the word at the even address)
 	UML_LOAD(block, I1, &m_aob, 0, SIZE_DWORD, SCALE_x1);            // i1 = m_aob
 	UML_AND(block, I2, I1, ~u32(1));                                 // i2 = m_aob & ~1
 
-	// THE READ.  Both prefetch and data reads go through SPACE_PROGRAM (the
-	// 68000 has one program space; the SSW_PROGRAM/SSW_DATA difference is an
-	// architectural field the caller wrote, not a UML space selection).  Read
-	// the word; the data read then selects a byte lane.
-	UML_READ(block, I0, I2, SIZE_WORD, SPACE_PROGRAM);              // i0 = read word at (m_aob & ~1)
-
-	if(step.byte_lane)
+	// THE ACCESS.  Both prefetch and data reads, and the data write, go through
+	// SPACE_PROGRAM (the 68000 has one program space under the gate; the
+	// SSW_PROGRAM/SSW_DATA difference is an architectural field the caller wrote,
+	// not a UML space selection).  Branch on the descriptor's kind (ADR 0007 W1):
+	// the charge + suspend checkpoint below are shared; only the access op and the
+	// fault branch differ.
+	if(step.kind == DRC_BUS_DATA_WRITE)
 	{
-		// m_edb = read; if(!(m_aob & 1)) m_edb >>= 8; then keep the low byte.
-		// (m_aob&1 ? low byte : high byte) -- matches the interpreter's lane mask
-		// 0x00ff/0xff00 + the ">>8 when even" select.
-		uml::code_label const lbl_odd = m_drc_labelnum++;
+		// WRITE: m_program.write_interruptible(m_aob & ~1, m_dbout, (m_aob&1)?0x00ff:0xff00)
+		// The CALLER has already done set_8xl(m_dbout, modified) and m_base_ssw =
+		// SSW_DATA.  UML_WRITEM is a masked word write at the even address mirroring
+		// the interpreter (a SIZE_BYTE write at the byte address would present a
+		// different bus shape -- W1: do NOT decompose).  No m_edb commit, no
+		// address-error branch (has_addr_error == 0 for writes).
+		uml::code_label const lbl_mask_done = m_drc_labelnum++;
 		UML_TEST(block, I1, 1);                                     // m_aob & 1 ?
-		UML_JMPc(block, COND_NZ, lbl_odd);                          // odd -> low byte already in place
-			UML_SHR(block, I0, I0, 8);                              // even -> high byte to low
-		UML_LABEL(block, lbl_odd);
-		UML_AND(block, I0, I0, 0xff);                               // keep the selected byte
+		UML_MOV(block, I4, u32(0xff00));                           // even -> high lane
+		UML_JMPc(block, COND_Z, lbl_mask_done);
+		UML_MOV(block, I4, u32(0x00ff));                           // odd -> low lane
+		UML_LABEL(block, lbl_mask_done);
+		UML_LOAD(block, I0, &m_dbout, 0, SIZE_WORD, SCALE_x1);     // i0 = m_dbout (replicated byte)
+		UML_WRITEM(block, I2, I0, I4, SIZE_WORD, SPACE_PROGRAM);   // masked word write, byte lane
 	}
+	else
+	{
+		// READ (unchanged from O-mem-1): read the word, then a data read selects a
+		// byte lane and commits m_edb.
+		UML_READ(block, I0, I2, SIZE_WORD, SPACE_PROGRAM);         // i0 = read word at (m_aob & ~1)
 
-	// commit the read into m_edb (the interpreter stores read result in m_edb).
-	// m_edb is u16 -> SIZE_WORD (a DWORD store would clobber the adjacent m_irc).
-	UML_STORE(block, &m_edb, 0, I0, SIZE_WORD, SCALE_x1);           // m_edb = read
+		if(step.byte_lane)
+		{
+			// m_edb = read; if(!(m_aob & 1)) m_edb >>= 8; then keep the low byte.
+			// (m_aob&1 ? low byte : high byte) -- matches the interpreter's lane mask
+			// 0x00ff/0xff00 + the ">>8 when even" select.
+			uml::code_label const lbl_odd = m_drc_labelnum++;
+			UML_TEST(block, I1, 1);                                 // m_aob & 1 ?
+			UML_JMPc(block, COND_NZ, lbl_odd);                      // odd -> low byte already in place
+				UML_SHR(block, I0, I0, 8);                          // even -> high byte to low
+			UML_LABEL(block, lbl_odd);
+			UML_AND(block, I0, I0, 0xff);                           // keep the selected byte
+		}
+
+		// commit the read into m_edb (the interpreter stores read result in m_edb).
+		// m_edb is u16 -> SIZE_WORD (a DWORD store would clobber the adjacent m_irc).
+		UML_STORE(block, &m_edb, 0, I0, SIZE_WORD, SCALE_x1);       // m_edb = read
+	}
 
 	// m_icount -= charge
 	UML_LOAD(block, I3, &m_icount, 0, SIZE_DWORD, SCALE_x1);        // i3 = m_icount
