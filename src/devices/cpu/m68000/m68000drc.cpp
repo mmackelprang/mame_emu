@@ -496,20 +496,32 @@ void m68000_device::generate_bus_step(drcuml_block &block, const struct drc_bus_
 	// fault branch differ.
 	if(step.kind == DRC_BUS_DATA_WRITE)
 	{
-		// WRITE: m_program.write_interruptible(m_aob & ~1, m_dbout, (m_aob&1)?0x00ff:0xff00)
-		// The CALLER has already done set_8xl(m_dbout, modified) and m_base_ssw =
-		// SSW_DATA.  UML_WRITEM is a masked word write at the even address mirroring
-		// the interpreter (a SIZE_BYTE write at the byte address would present a
-		// different bus shape -- W1: do NOT decompose).  No m_edb commit, no
-		// address-error branch (has_addr_error == 0 for writes).
-		uml::code_label const lbl_mask_done = m_drc_labelnum++;
-		UML_TEST(block, I1, 1);                                     // m_aob & 1 ?
-		UML_MOV(block, I4, u32(0xff00));                           // even -> high lane
-		UML_JMPc(block, COND_Z, lbl_mask_done);
-		UML_MOV(block, I4, u32(0x00ff));                           // odd -> low lane
-		UML_LABEL(block, lbl_mask_done);
-		UML_LOAD(block, I0, &m_dbout, 0, SIZE_WORD, SCALE_x1);     // i0 = m_dbout (replicated byte)
-		UML_WRITEM(block, I2, I0, I4, SIZE_WORD, SPACE_PROGRAM);   // masked word write, byte lane
+		// WRITE: m_program.write_interruptible(m_aob & ~1, m_dbout [, lane mask]).
+		// The CALLER has already set m_dbout and m_base_ssw = SSW_DATA.  step.byte_lane
+		// selects the bus shape, single-sourced from the handler's write call:
+		//   byte_lane==1 (O-mem-2 byte RMW / O-mem-3b byte store): masked word write at
+		//     the even address, lane (m_aob&1)?0x00ff:0xff00 -- UML_WRITEM (UNCHANGED).
+		//   byte_lane==0 (O-mem-3 word/long MOVE store): full-word write, no lane --
+		//     UML_WRITE (ADR 0007 M1, the one generate_bus_step primitive edit).
+		// No m_edb commit.  The shared address-error branch below is kind-agnostic and
+		// FIRES for word writes (has_addr_error==1) and NOT for byte writes (==0); I1
+		// (= m_aob) is preserved across this branch so its m_aob&1 test is correct.
+		if(step.byte_lane)
+		{
+			uml::code_label const lbl_mask_done = m_drc_labelnum++;
+			UML_TEST(block, I1, 1);                                     // m_aob & 1 ?
+			UML_MOV(block, I4, u32(0xff00));                           // even -> high lane
+			UML_JMPc(block, COND_Z, lbl_mask_done);
+			UML_MOV(block, I4, u32(0x00ff));                           // odd -> low lane
+			UML_LABEL(block, lbl_mask_done);
+			UML_LOAD(block, I0, &m_dbout, 0, SIZE_WORD, SCALE_x1);     // i0 = m_dbout (replicated byte)
+			UML_WRITEM(block, I2, I0, I4, SIZE_WORD, SPACE_PROGRAM);   // masked word write, byte lane
+		}
+		else
+		{
+			UML_LOAD(block, I0, &m_dbout, 0, SIZE_WORD, SCALE_x1);     // i0 = m_dbout (full word)
+			UML_WRITE(block, I2, I0, SIZE_WORD, SPACE_PROGRAM);       // full-word write, no lane (O-mem-3 word/long)
+		}
 	}
 	else
 	{
