@@ -108,10 +108,13 @@ void m68000_device::code_flush_cache()
 		// resident block (begin_block allocates maxinst*9/4 instruction slots and
 		// drcuml_block_append throws emu_fatalerror "Overran maxinst" past that).
 		// boundary M's 64 sufficed for moveq alone (~50 ins); O-mem-1's native
-		// btst-absolute (.W 4-read + .L 5-read sequences) brings the block to
-		// ~530 instructions, and later O-mem batches add more -- size it with
-		// headroom so adding an opcode does not silently overrun the block.
-		drcuml_block &block(m_drcuml->begin_block(1024));
+		// btst-absolute (.W 4-read + .L 5-read sequences) brought the block to
+		// ~530 instructions; O-mem-2's 24 bit-op forms (each a full ext/EA/read/
+		// modify/refill/write/retire sequence) add ~4k more -- size it with
+		// headroom so adding an opcode does not silently overrun the block.  At
+		// 8192 the transient descriptor allocation (~18k slots) is a small
+		// fraction of the 8 MiB DRC cache.
+		drcuml_block &block(m_drcuml->begin_block(8192));
 		static_generate_entry_point(block);
 		block.end();
 	}
@@ -212,6 +215,24 @@ bool m68000_device::is_native_opcode(u16 opword)
 	// btst #n,(xxx).W : 0x0838  /  btst #n,(xxx).L : 0x0839  (mask 0xfffe matches both)
 	if((opword & 0xfffe) == 0x0838)
 		return true;
+	// O-mem-2: btst/bchg/bclr/bset #n,(An)/(An)+/-(An)  (mask 0xfff8)
+	switch(opword & 0xfff8)
+	{
+	case 0x0810: case 0x0818: case 0x0820:   // btst #n
+	case 0x0850: case 0x0858: case 0x0860:   // bchg #n
+	case 0x0890: case 0x0898: case 0x08a0:   // bclr #n
+	case 0x08d0: case 0x08d8: case 0x08e0:   // bset #n
+		return true;
+	}
+	// O-mem-2: btst/bchg/bclr/bset Dn,(An)/(An)+/-(An)  (mask 0xf1f8)
+	switch(opword & 0xf1f8)
+	{
+	case 0x0110: case 0x0118: case 0x0120:   // btst Dn
+	case 0x0150: case 0x0158: case 0x0160:   // bchg Dn
+	case 0x0190: case 0x0198: case 0x01a0:   // bclr Dn
+	case 0x01d0: case 0x01d8: case 0x01e0:   // bset Dn
+		return true;
+	}
 	return false;
 }
 
@@ -256,6 +277,55 @@ void m68000_device::generate_native_dispatch(drcuml_block &block, uml::code_labe
 		UML_JMP(block, lbl_delegate);                               // fully-granted path: retired -> hand the timing tail to the interpreter
 		UML_LABEL(block, lbl_not_btst_abs);
 		m_drc_native_mem_ea_arms++;                                 // emission probe (Task 7)
+	}
+
+	// O-mem-2: btst/bchg/bclr/bset (An)/(An)+/-(An), #imm8 and Dn source -- native
+	// ONLY behind the space-topology gate (ADR 0007 Addendum; W6).  Each arm calls
+	// the generic emitter with its form constants; the bus-step run (substates /
+	// charges / pre_charge) is single-sourced from the generator.  The #imm8 forms
+	// (mask 0xfff8) and Dn forms (mask 0xf1f8) are disjoint on the EA-mode field and
+	// never collide with the btst-absolute arm above (0x0838/0x0839).
+	if (drc_native_mem_ea_allowed())
+	{
+		static const bitop_form k_forms[] = {
+			// #imm8 source (mask 0xfff8)
+			{ 0x0810, 0xfff8, BITOP_BTST, BITEA_AIS,  BITSRC_IMM8 },
+			{ 0x0818, 0xfff8, BITOP_BTST, BITEA_AIPS, BITSRC_IMM8 },
+			{ 0x0820, 0xfff8, BITOP_BTST, BITEA_PAIS, BITSRC_IMM8 },
+			{ 0x0850, 0xfff8, BITOP_BCHG, BITEA_AIS,  BITSRC_IMM8 },
+			{ 0x0858, 0xfff8, BITOP_BCHG, BITEA_AIPS, BITSRC_IMM8 },
+			{ 0x0860, 0xfff8, BITOP_BCHG, BITEA_PAIS, BITSRC_IMM8 },
+			{ 0x0890, 0xfff8, BITOP_BCLR, BITEA_AIS,  BITSRC_IMM8 },
+			{ 0x0898, 0xfff8, BITOP_BCLR, BITEA_AIPS, BITSRC_IMM8 },
+			{ 0x08a0, 0xfff8, BITOP_BCLR, BITEA_PAIS, BITSRC_IMM8 },
+			{ 0x08d0, 0xfff8, BITOP_BSET, BITEA_AIS,  BITSRC_IMM8 },
+			{ 0x08d8, 0xfff8, BITOP_BSET, BITEA_AIPS, BITSRC_IMM8 },
+			{ 0x08e0, 0xfff8, BITOP_BSET, BITEA_PAIS, BITSRC_IMM8 },
+			// Dn source (mask 0xf1f8)
+			{ 0x0110, 0xf1f8, BITOP_BTST, BITEA_AIS,  BITSRC_DN },
+			{ 0x0118, 0xf1f8, BITOP_BTST, BITEA_AIPS, BITSRC_DN },
+			{ 0x0120, 0xf1f8, BITOP_BTST, BITEA_PAIS, BITSRC_DN },
+			{ 0x0150, 0xf1f8, BITOP_BCHG, BITEA_AIS,  BITSRC_DN },
+			{ 0x0158, 0xf1f8, BITOP_BCHG, BITEA_AIPS, BITSRC_DN },
+			{ 0x0160, 0xf1f8, BITOP_BCHG, BITEA_PAIS, BITSRC_DN },
+			{ 0x0190, 0xf1f8, BITOP_BCLR, BITEA_AIS,  BITSRC_DN },
+			{ 0x0198, 0xf1f8, BITOP_BCLR, BITEA_AIPS, BITSRC_DN },
+			{ 0x01a0, 0xf1f8, BITOP_BCLR, BITEA_PAIS, BITSRC_DN },
+			{ 0x01d0, 0xf1f8, BITOP_BSET, BITEA_AIS,  BITSRC_DN },
+			{ 0x01d8, 0xf1f8, BITOP_BSET, BITEA_AIPS, BITSRC_DN },
+			{ 0x01e0, 0xf1f8, BITOP_BSET, BITEA_PAIS, BITSRC_DN },
+		};
+		for(const bitop_form &f : k_forms)
+		{
+			uml::code_label const lbl_next = m_drc_labelnum++;
+			UML_AND(block, I0, I7, f.mask);
+			UML_CMP(block, I0, f.value);
+			UML_JMPc(block, COND_NE, lbl_next);                     // not this form -> next test
+			generate_bitop_mem(block, f, lbl_delegate);            // emit the form (suspend yields JMP lbl_delegate from within)
+			UML_JMP(block, lbl_delegate);                          // fully-granted: retired -> hand the tail to the interpreter
+			UML_LABEL(block, lbl_next);
+			m_drc_native_mem_ea_arms++;                            // emission probe (gate test)
+		}
 	}
 
 	// (more native opcodes are added here in boundary O, each ending in
