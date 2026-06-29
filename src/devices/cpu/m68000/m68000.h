@@ -278,6 +278,21 @@ protected:
 	enum movea_size : u8 { MEA_W, MEA_L };                  // word (ext32), long (set_16h+set_16l)
 	struct movea_form { u16 value; u16 mask; u8 ea; u8 size; };
 	void generate_movea_mem(drcuml_block &block, const struct movea_form &form, uml::code_label lbl_delegate); // native MOVEA (An)/(An)+/-(An)->An (O-mem-3a)
+	// O-mem-3b: native single-access (.b+.w) MOVE reg<->mem (An)/(An)+/-(An), both
+	// directions (15 forms).  One parameterized emitter driven by the generated bus-step
+	// run.  load (mem->Dn): source-EA read -> Dn write-back (set_8/set_16l, the unwritten
+	// half PRESERVED) + MOVE flags; NO data-write step.  store (reg->mem): the source
+	// register feeds m_dbout; the word DATA WRITE uses the byte_lane==0 full-word
+	// UML_WRITE (the one generate_bus_step primitive edit), the byte store the
+	// byte_lane==1 masked path.  -(An) store is PREFETCH-first then DATA WRITE (the
+	// reversed microcode order).  MOVE flags (sr_nzvc): N=MSB, Z=(value==0 over size),
+	// V=C=0, X untouched.  Decodes rx/ry from m_irdi (latched m_irdi=m_ird).
+	enum moverm_dir  : u8 { MRM_LOAD, MRM_STORE };          // mem->Dn ; reg->mem
+	enum moverm_size : u8 { MRM_B, MRM_W };                 // byte (byte_lane=1) ; word (byte_lane=0)
+	enum moverm_ea   : u8 { MRM_AIS, MRM_AIPS, MRM_PAIS };  // (An), (An)+, -(An)
+	enum moverm_reg  : u8 { MRM_DREG, MRM_AREG };           // store SOURCE reg kind (DREG for every load)
+	struct moverm_form { u16 value; u16 mask; u8 dir; u8 size; u8 ea; u8 reg; };
+	void generate_move_regmem(drcuml_block &block, const struct moverm_form &form, uml::code_label lbl_delegate); // native MOVE .b/.w reg<->mem (An)/(An)+/-(An) (O-mem-3b)
 	static bool is_native_opcode(u16 opword);   // the predicate identifying opcodes with a native fast-path
 	void func_interpret_quantum();              // run the interpreter for the granted quantum (the cfunc body)
 	static void cfunc_interpret_quantum(void *param);
