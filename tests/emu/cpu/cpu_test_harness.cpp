@@ -373,7 +373,13 @@ public:
 	// yields the instruction's true bus-cycle cost == the corpus `length`.
 	int step_instruction(int budget)
 	{
-		(void)budget;
+		// Full-grant Leg-B pass (ADR 0007 W4 / OQ-7): grant the whole instruction's
+		// cycles on the FIRST iteration so a multi-step native opcode runs every bus
+		// step -- including the data WRITE -- natively, then drain at 1.  Selected by
+		// env (alongside CPUORACLE_M68_DRC_C).  When unset, behaviour is the legacy
+		// 1-cycle-per-iteration stepping (validates native step 1 + the suspend handoff).
+		static const bool s_full_grant = (std::getenv("CPUORACLE_M68_DRC_FULLGRANT") != nullptr);
+		const int first_grant = s_full_grant ? (budget > 0 ? budget : 1) : 1;
 
 		// The over-run carry must start clean so the first grant is not
 		// silently swallowed by a stale m_count_before_instruction_step from a
@@ -428,7 +434,8 @@ public:
 			}
 			else
 				snapshot_retired();
-			*m_icountptr = 1;
+			const int grant = (guard == 0) ? first_grant : 1;
+			*m_icountptr = grant;
 			run();
 			// If this step advanced m_ipc, the core has dispatched the next thing,
 			// so its cycles belong to that, NOT our instruction -- break WITHOUT
@@ -446,7 +453,7 @@ public:
 				m_did_not_retire = false;   // clean retirement
 				break;
 			}
-			consumed += 1 - *m_icountptr;
+			consumed += grant - *m_icountptr;
 		}
 
 		return frozen_consumed >= 0 ? frozen_consumed : consumed;
