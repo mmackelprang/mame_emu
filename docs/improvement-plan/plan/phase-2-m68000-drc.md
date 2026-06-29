@@ -339,7 +339,14 @@ PR, but `./mame -validate` and the interpreter leg must remain green.)
     retroactively gates O-mem-1's native tail — divergences there are in-scope); **Task 0** — the
     `AS_OPCODES` differential-oracle config; and the `set_current_mmu`/`enable_mmu → m_cache_dirty`
     safeguard + regen test.
-  - **O-mem-3:** memory-EA `MOVE`/`MOVEA` (`.b`/`.w`/`.l`) — the broadest coverage jump.
+  - **O-mem-3:** memory-EA `MOVE`/`MOVEA` (`.b`/`.w`/`.l`) — the broadest coverage jump (~88 forms).
+    Design pinned by the **[ADR 0007 O-mem-3 addendum](../adr/0007-m68000-native-memory-ea-suspend-mechanism.md#addendum--resolution-2026-06-28--o-mem-3-memory-ea-movemovea)**:
+    no new `step.kind`/descriptor field (word = `byte_lane=0` single step, long = two word steps/side,
+    addr-error on word/long data r+w already supported); the one primitive edit is the write branch
+    honoring `byte_lane==0` → full-word `UML_WRITE`; `(d16,An)` = +1 prefetch + `ext32(d16)+An`; MOVEA =
+    register write-back, no flags, no data-write step. **Split into 5 sub-batches O-mem-3a…3e** (MOVEA →
+    single-access reg↔mem → single-access mem→mem → long → `(d16,An)`), each independently oracle-gated.
+    The long batches (3a/3d) need the **parameterized partial-grant sweep** (OQ-10 — one owner decision).
   - **O-mem-4:** memory-EA `ALU` (`add`/`sub`/`and`/`or`/`eor`/`cmp` + immediate forms).
   - **O-mem-5+:** `(d16,PC)` source, `addq`/`subq`/`Scc`/`clr`/`tst`/`neg`/`not` memory-EA forms.
 

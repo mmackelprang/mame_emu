@@ -1,12 +1,18 @@
 # ADR 0007 — m68000 DRC native memory-EA + suspend / cycle / address-error mechanism
 
-> **Status:** Accepted, **amended 2026-06-28** by **two** addenda at the foot of this file:
+> **Status:** Accepted, **amended 2026-06-28** by **three** addenda at the foot of this file:
 > (1) the [O-mem-1 pre-merge review](#addendum--resolution-2026-06-28--o-mem-1-pre-merge-review)
-> (corrects §1's address-space claim, makes §5 an enforceable compile-time gate); and
+> (corrects §1's address-space claim, makes §5 an enforceable compile-time gate);
 > (2) the [O-mem-2 write-side mechanism](#addendum--resolution-2026-06-28--o-mem-2-write-side-mechanism)
 > (designs the RMW write step + auto-inc/dec EA arithmetic + `Dn`/`#imm8` source forms, adds the
 > fully-granted Leg-B oracle pass, resolves OQ-6…OQ-9, confirms gate continuity, and corrects the MMU
-> rationale — **all O-mem-2 questions owner-decided 2026-06-28; the Planner has a fully-decided spec**).
+> rationale — **all O-mem-2 questions owner-decided 2026-06-28; the Planner has a fully-decided spec**); and
+> (3) the [O-mem-3 memory-EA MOVE/MOVEA design](#addendum--resolution-2026-06-28--o-mem-3-memory-ea-movemovea)
+> (word/long data bus-steps — no new `step.kind`; the single `byte_lane==0` full-word-write primitive
+> change; `(d16,An)`; the two-EA read→write composition + MOVEA register write-back; and the **5-sub-batch
+> split** for the broadest coverage jump — **all O-mem-3 questions owner-decided 2026-06-28 (OQ-10
+> resolved: accept the by-construction residual, no partial-grant sweep); O-mem-3a planned in
+> [`plan/phase-2-o-mem-3a-movea.md`](../plan/phase-2-o-mem-3a-movea.md)**).
 > Each addendum is the controlling text where it conflicts with the body. Original: Accepted (all 5
 > open questions resolved by the owner; O-mem-1 planned —
 > see [`plan/phase-2-o-mem-1-btst-absolute.md`](../plan/phase-2-o-mem-1-btst-absolute.md)) ·
@@ -1233,3 +1239,375 @@ with the internal `−2` folded before the data read; `Dn`-source forms shift do
 No open questions remain for O-mem-2; the Planner has a fully-decided spec. (The deferring-tap oracle
 config under OQ-6, and the native-`AS_OPCODES` space-selection path, stay deferred to later, separately
 scoped increments and are recorded as such.)
+
+---
+
+## Addendum / Resolution (2026-06-28) — O-mem-3 memory-EA MOVE/MOVEA
+
+> **Status:** Accepted. Extends (does not alter) the mechanism, the increment plan (§6 row 3), the
+> compile-time space-topology gate, OQ-1…OQ-5, and the O-mem-2 write-side design. It is the controlling
+> design for the **O-mem-3** batch — **memory-EA `MOVE`/`MOVEA` (`.b`/`.w`/`.l`) with `(An)`/`(An)+`/
+> `-(An)`/`(d16,An)` source and dest**, the *broadest single coverage jump* in the arc. Written by the
+> Architect from a line-by-line read of the as-built `generate_bus_step()` (`m68000drc.cpp:437-547`),
+> the O-mem-2 emitter (`generate_bitop_mem`, `:813`), the oracle stepper (`cpu_test_harness.cpp:390-480`,
+> which now carries **three** grant modes — 1-cycle, full-grant, **partial-grant**), and the interpreter
+> `_df` handlers in `m68000-sdf.cpp`.
+>
+> **Bottom line up front.** O-mem-3 is **mostly composition** of the proven primitive plus **one small
+> primitive change** and **one oracle extension** — it needs **no new `step.kind` and no new descriptor
+> fields**. The genuinely-new work is: (a) the `byte_lane==0` full-word **write** path in
+> `generate_bus_step()`; (b) the `MOVE`/`MOVEA` opcode emitters (two-EA composition, `(d16,An)`
+> arithmetic, the long high/low-word latch dataflow, `MOVE` flags, `MOVEA` register write-back); and
+> (c) a **parameterized partial-grant oracle sweep** that the multi-access (long) forms require to
+> validate their *intermediate* mid-instruction resume boundaries. The coverage is large (~88 native
+> memory-EA forms), so the headline recommendation is a **5-sub-batch split (O-mem-3a…3e)**, each
+> independently oracle-gated and mergeable. **OQ-10 (the partial-grant sweep) is now owner-decided
+> (2026-06-28): accept the by-construction residual — no sweep; everything else was settled here for the
+> Planner. O-mem-3a is planned in [`plan/phase-2-o-mem-3a-movea.md`](../plan/phase-2-o-mem-3a-movea.md).**
+
+### Scope of O-mem-3 (pin it before the Planner expands it)
+
+The MOVE handler naming is `move_<size>_<srcEA>_<dstEA>_df` / `movea_<size>_<srcEA>_ad_df`. The in-scope
+EA-mode suffixes (verified against the handler table): **source** `ais`=`(An)`, `aips`=`(An)+`,
+`pais`=`-(An)`, `das`=`(d16,An)`, plus the register operands `ds`=`Dn`, `as`=`An`(word/long only);
+**dest** `aid`=`(An)`, `aipd`=`(An)+`, `paid`=`-(An)`, `dad`=`(d16,An)`, plus `dd`=`Dn`, `ad`=`An`
+(MOVEA). **Out of scope** (deferred to O-mem-5 / permanent `cfunc_`, per §6 / §5): indexed `(d8,An,Xn)`
+(`dais`/`daid`), absolute `(xxx).W/.L` (`adr16`/`adr32`), `(d16,PC)`/`(d8,PC,Xn)` (`dpc`/`dpci`), and
+immediate (`imm*`) — these are *additional* MOVE forms, not part of O-mem-3.
+
+A form is **in scope for O-mem-3 iff at least one operand is a memory EA in `{(An),(An)+,-(An),(d16,An)}`**
+(pure register↔register MOVE — `move Dn,Dn` etc. — has *no* bus data step and is a `moveq`-class
+register-only opcode, not memory-EA; it is not part of O-mem-3). Verified counts (`grep` on the `_df`
+table):
+
+| Category | `.b` | `.w` | `.l` | total |
+|---|---|---|---|---|
+| **mem→mem** (`{ais,aips,pais,das}`×`{aid,aipd,paid,dad}`) | 16 | 16 | 16 | **48** |
+| **Dn→mem** store (`ds`×`{aid,aipd,paid,dad}`) | 4 | 4 | 4 | **12** |
+| **mem→Dn** load (`{ais,aips,pais,das}`×`dd`) | 4 | 4 | 4 | **12** |
+| **An→mem** (`as`×`{aid,aipd,paid,dad}`, word/long) | — | 4 | 4 | **8** |
+| **MOVEA mem→An** (`{ais,aips,pais,das}`×`ad`, word/long) | — | 4 | 4 | **8** |
+| **total in-scope** | 24 | 32 | 32 | **~88** |
+
+(~88 vs O-mem-2's 24 — **~3.7×**. This is why O-mem-3 must split; see M4.)
+
+### M1. Word / long data bus-step design — **no new `step.kind`, one primitive change**
+
+The decisive finding: the existing read/write step kinds and the existing descriptor fields (`kind`,
+`size`, `charge`, `redo_substate`, `completed_substate`, `has_addr_error`, `byte_lane`, `pre_charge`)
+**already express every word and long data access**. Verified against the three canonical handlers:
+
+- **Word** (`move_w_ais_aid_df:58141`): the data read is `m_program.read_interruptible(m_aob & ~1)`
+  (no mask arg → **full word, no byte-lane**) and the write is
+  `m_program.write_interruptible(m_aob & ~1, m_dbout)` (no mask → **full word**). So a word data step is
+  exactly the existing `DATA_READ`/`DATA_WRITE` with **`byte_lane = 0`**.
+- **Address-error on word/long data** (verified `:58163`, `:58188` for the word read *and* write): both
+  the data read **and** the data write carry `if(m_aob & 1){ m_icount -= 4; m_inst_state =
+  S_ADDRESS_ERROR; return; }`. This differs from O-mem-2, where the *byte* data read/write had
+  `has_addr_error = 0` (byte even/odd both legal). For word/long, the generator emits
+  **`has_addr_error = 1` on the data read AND the data write**. **No code change is needed for the
+  write fault branch** — `generate_bus_step()`'s address-error branch (`m68000drc.cpp:530-543`) is
+  *already kind-agnostic*: it is emitted after the shared charge+checkpoint, keyed solely on
+  `step.has_addr_error`, and `I1` (`= m_aob`) is preserved across the write emission and the checkpoint,
+  so the test `I1 & 1` is correct for a write step. The interpreter order (write → `−4` → suspend
+  checkpoint → `if(m_aob&1)` fault) matches the emitted order exactly.
+- **Long = TWO word bus cycles per side** (`move_l_ais_aid_df:42542`, verified): a long mem→mem MOVE is
+  **5 bus steps** — source read **HIGH** word (substates 1/2), source read **LOW** word (3/4), dest
+  write **HIGH** word (5/6), dest write **LOW** word (7/8), final prefetch (9/10). **Ordering: high word
+  at the lower address, low word at address+2** (big-endian), read-high-then-low, write-high-then-low.
+  **Each word is its own descriptor row** with its own `charge = 4`, its own `redo/completed` substate
+  pair, and **`has_addr_error = 1`** (each word access faults on odd `m_aob`; in practice only the first
+  word can fault because the EA is even-aligned, but the generator emits the branch on all four —
+  single-sourced from the handler, never pruned). The long flag computation is split across the two
+  write states (`sr_nzvc()` at the first, `sr_nz_u()` Z-accumulate at the second — see M3).
+
+**The single primitive change (the only edit to `generate_bus_step()` for O-mem-3):** the as-built write
+branch (`m68000drc.cpp:463-479`) **always** emits a masked `UML_WRITEM` (it computes the `0x00ff`/`0xff00`
+lane mask unconditionally). For word/long the write must be a **full-word `UML_WRITE`** (no lane mask,
+value = the full 16-bit `m_dbout`). Make the write branch honor `step.byte_lane`:
+
+```cpp
+if (step.kind == DRC_BUS_DATA_WRITE)
+{
+    UML_LOAD(block, I0, &m_dbout, 0, SIZE_WORD, SCALE_x1);          // i0 = m_dbout
+    if (step.byte_lane)                                             // O-mem-2 byte path (unchanged)
+    {
+        // ... compute 0x00ff/0xff00 mask in I4 ...
+        UML_WRITEM(block, I2, I0, I4, SIZE_WORD, SPACE_PROGRAM);    // masked word write, byte lane
+    }
+    else                                                           // O-mem-3 word/long path (NEW)
+    {
+        UML_WRITE(block, I2, I0, SIZE_WORD, SPACE_PROGRAM);         // full-word write, no lane
+    }
+}
+```
+
+That is the entirety of the bus-primitive change. The read branch already handles `byte_lane == 0`
+(it skips the lane select and commits the full word to `m_edb`) — verified at `:486-501`; word/long
+reads need **zero** read-branch change. (O-mem-1's `btst`-absolute prefetch reads are already
+`byte_lane == 0` word reads with `has_addr_error = 1`, so the word read path is exercised today.)
+
+**Mechanism-novelty isolation that falls out of M1:** the *first* word-write batch (O-mem-3b, M4) is the
+only batch that touches `generate_bus_step()`; **O-mem-3a (MOVEA, read-only) touches it not at all**
+(MOVEA reads via the existing word/long read path and writes to a *register*, not the bus). This makes
+3a the natural opener — a purely additive emitter + descriptor extension, no primitive edit.
+
+### M2. `(d16,An)` EA mode — one extra prefetch step + `ea = An + sext(d16)`
+
+Verified against `move_w_das_aid_df:58403` (source) and `move_w_ais_dad_df:61768` (dest): the `(d16,An)`
+displacement word is **already in the prefetch pipe** (`m_dbin`/`m_irc`) when the EA state runs — it is
+*not* a separately-issued read. The `(d16,An)` EA state:
+
+1. computes the EA: `m_au = ext32(<d16>) + m_da[r]` where `ext32(v) = s32(s16(v))` (`m68000.h:349`) and
+   `<d16>` is the displacement word read from the pipe (`m_dbin` for a source `(d16,An)`; captured to a
+   scratch — the interpreter uses `m_aluo` — for a dest `(d16,An)`, because the source-data read
+   overwrites `m_dbin` first; verified `move_w_ais_dad_df:61776,61799`);
+2. issues **one prefetch read** (`m_opcodes.read_interruptible`, `byte_lane = 0`, `has_addr_error = 1`)
+   to refill the pipe — i.e. `(d16,An)` adds **exactly one prefetch bus step** versus the
+   register-indirect `(An)` form, plus the sign-extend-add arithmetic.
+
+So `(d16,An)` composes with the rest with **no new mechanism**: it is the register-indirect form **plus**
+one prefetch `generate_bus_step()` **plus** the `ext32(d16) + An` setup (emitter arithmetic, like
+O-mem-2's auto-inc/dec EA setup — *not* part of the bus primitive). It has **no** interaction with
+`(An)+`/`-(An)` (a single MOVE operand is one mode or the other). The d16-capture-to-scratch dataflow
+for the **dest** case is the subtle part (the displacement must be saved before the source-data read
+clobbers `m_dbin`); the Builder mirrors the handler's exact scratch usage (`m_aluo`) — pinned as a
+derive-from-handler item, not abstracted here.
+
+### M3. Two-EA read→write composition (MOVE) and register write-back (MOVEA)
+
+**MOVE = source-EA-read → flag-set → dest-EA-write → final-prefetch.** The general path, verified from
+`move_w_ais_aid_df`:
+
+- **Source EA setup + data read(s)** (1 word for `.b`/`.w`; 2 words high-then-low for `.l`) via the
+  existing read step; the value lands in `m_dbin` (`.b`/`.w`) or `m_alue`(high)+`m_dbin`(low) (`.l` — the
+  read-low state latches the high word into `m_alue`/`m_alub`, verified `:42570-42571`).
+- **Flags are computed at the dest-write *setup* state, BEFORE the write** (verified `:58176`
+  `alu_and(m_dbin,0xffff); sr_nzvc();`): `MOVE` sets **N = result MSB, Z = (result == 0), V = C = 0;
+  X/I/S/T untouched** — i.e. `sr_nzvc()` (`m68000.h:1027`). For **long**, the computation is split: the
+  first write state does `sr_nzvc()` and the second does `sr_nz_u()` (`m68000.h:1023`, the Z-accumulate
+  `Z := Z_prev && (this_half == 0)`), so the 32-bit N comes from the high half and Z is the AND of both
+  halves. The emitter must either replicate the interpreter's exact `m_isr`/`sr_*` op sequence **or**
+  compute the equivalent N/Z directly and prove equivalence under the full-grant oracle — the same tactic
+  O-mem-2's `compute_z` used (`m68000drc.cpp:687-701`). **Pinned constraint:** SR is not read between the
+  data access and retire, so a single clean N/Z computation is admissible *if* it is validated by the
+  full-grant pass; the long split is the safe default. The exact placement is a derive-from-handler item.
+- **Dest EA setup + data write(s)** (1 word `.b`/`.w`; 2 words high-then-low `.l`) via the M1 write step;
+  `m_dbout` carries the value (`m_dbin` for word; `m_alue` then `m_aluo` for the two long words, verified
+  `:42593,42618`).
+- **Auto-inc/dec writeback ordering is per-side and independent**: each EA's `(An)+` post-increment /
+  `-(An)` pre-decrement (delta `2` for word, `4` for long, **no** A7 byte exception — that rule is
+  byte-only, O-mem-2 W2's generalization note) is emitted in that EA's own setup, exactly as the handler
+  sequences it. The source side writes back before/after its read and the dest side before/after its
+  write, each mirroring its handler — there is no cross-side coupling.
+
+**MOVEA = source-EA-read → register write-back → final-prefetch (no data write, no flags).** Verified
+`movea_w_ais_ad_df:57162` and `movea_l_ais_ad_df:41263`: the destination is an **address register**, so
+there is **no DATA_WRITE bus step**. `movea.w` does `m_da[rx] = ext32(m_dbin)` (sign-extend the word to
+the full 32-bit An, `:57194`); `movea.l` does `set_16l(m_da[rx], m_dbin)` + `set_16h(m_da[rx], m_alue)`
+(the full 32-bit value, `:41316,41323`). **MOVEA sets no flags** (no `sr_*` call). This is the
+`moveq`-class register-dest pattern (a register write-back folded into the prefetch state) but with a
+**memory-EA source read** in front — so MOVEA reuses the read step + the register write-back, and is
+strictly simpler than MOVE mem→mem (no write side, no flags). MOVEA is word/long only (`movea.b` does
+not exist).
+
+### M4. BATCHING RECOMMENDATION — **split into 5 sub-batches (O-mem-3a…3e)**
+
+**Recommendation: do NOT ship O-mem-3 as one PR.** At ~88 forms it is ~3.7× O-mem-2, and it layers
+*five* independent new mechanisms (word write; two-EA composition; long two-word/side + latch + split
+flags; `(d16,An)`; MOVEA register write-back). A single PR would (a) be unreviewable (the dispatch table
+alone is ~88 arms), (b) blow the oracle runtime per pass (and there are now **three** passes × **two**
+backends = six oracle invocations), and (c) make any full-grant/partial-grant divergence ambiguous
+across five suspect mechanisms at once. Split it so **each sub-batch isolates exactly one new mechanism**,
+is **independently oracle-gated** (all three grant modes, x64 + C), and is **independently mergeable**.
+
+Proposed split (dependency-ordered; each row is one boundary-O PR):
+
+| Sub-batch | Forms (~) | NEW mechanism it isolates | `generate_bus_step` change? |
+|---|---|---|---|
+| **O-mem-3a — MOVEA `(An)/(An)+/-(An) → An`, `.w`+`.l`** | 6 | **long two-word READ + high-word latch** (`m_alue`/`m_alub`) and the **register write-back** (`ext32` for `.w`; `set_16h`+`set_16l` for `.l`); **no write, no flags** — the gentlest opener. **`(d16,An)` deferred to 3e** (Planner resolution 2026-06-28; see note below the table). | **none** (read-only + register write) |
+| **O-mem-3b — single-access (`.b`+`.w`) MOVE reg↔mem `(An)/(An)+/-(An)`** | ~16 | the **word DATA WRITE** (`byte_lane==0` full-word `UML_WRITE` — the one M1 primitive edit) on the store; the **register-dest load** (read → `Dn` write, no data-write step); **MOVE flags** (`sr_nzvc`, single-access); byte reuses O-mem-2's `byte_lane==1` access. | **the M1 write-branch edit** |
+| **O-mem-3c — single-access (`.b`+`.w`) MOVE mem→mem `(An)/(An)+/-(An)`** | ~18 | the **general two-EA read-EA→write-EA composition** + **dual auto-inc/dec** writeback ordering (both sides memory). Reuses 3b's read + write steps. | none |
+| **O-mem-3d — long (`.l`) MOVE reg↔mem + mem→mem `(An)/(An)+/-(An)`** | ~17 | the **long two-word WRITE** (write high/low, `m_aluo`/`m_alue` dataflow) + the **split long flags** (`sr_nzvc`+`sr_nz_u`); highest substate count (1/2…9/10). Reuses 3a's long read + 3b/3c composition. | none |
+| **O-mem-3e — `(d16,An)` source & dest across all sizes/topologies (incl. MOVEA `(d16,An)→An`)** | ~31 | the **`(d16,An)` EA** for MOVE and MOVEA (extra prefetch + `ext32(d16)+An` + the dest d16-capture-to-scratch). Absorbs the 2 MOVEA `(d16,An)→An` forms moved out of 3a (Planner resolution 2026-06-28). Reuses everything else. | none |
+
+> **Planner resolution (2026-06-28) — `(d16,An)` isolated in 3e; 3a is 6 forms.** The 3a row above
+> originally listed `(d16,An)→An` (8 forms), which conflicts with the split's *primary driver* (one new
+> mechanism per batch) and with 3e's definition as the orthogonal `(d16,An)` batch: `(d16,An)` introduces
+> a distinct mechanism — an extra prefetch step plus the `ext32(d16)+An` sign-extend-add EA arithmetic —
+> that `(An)/(An)+/-(An)` do not. To keep 3a proving **only** the long-read + high-word latch + register
+> write-back with zero EA-arithmetic novelty (and to avoid splitting the `(d16,An)` mechanism across two
+> batches), the Planner moves MOVEA `(d16,An)→An` (`das`→`ad`, `.w`+`.l`, **2 forms**) into **3e** (which
+> already lands every other `(d16,An)` form). **3a is therefore 6 forms:** MOVEA `(An)/(An)+/-(An) → An`,
+> `.w`+`.l`. 3e grows by 2 (~31). No other batch changes. O-mem-3a is planned in
+> [`plan/phase-2-o-mem-3a-movea.md`](../plan/phase-2-o-mem-3a-movea.md).
+
+**Why this order and these cut-lines (the rationale the user asked for):**
+
+- **Mechanism-novelty isolation (the primary driver).** Each batch adds *one* suspect. 3a proves the
+  long-read + latch with no write/flag noise; 3b adds the write primitive on the simplest (single-EA)
+  topology; 3c adds the two-EA composition on the proven single-access write; 3d adds the long *write* on
+  the proven composition; 3e adds the `(d16,An)` EA last, orthogonally. A full-grant or partial-grant
+  failure in batch N points at exactly the mechanism batch N introduced.
+- **The only primitive edit is confined to 3b.** 3a, 3c, 3d, 3e are pure emitter + generator-descriptor
+  additions over a frozen `generate_bus_step()` — smaller blast radius, easier review, and the
+  primitive change is reviewed once in isolation (mirrors O-mem-1 landing the mechanism alone).
+- **Review surface.** Each batch is ~8–29 forms (≤ ~1.2× O-mem-2's 24), a reviewable dispatch-table +
+  emitter delta, not an 88-arm wall.
+- **Oracle runtime.** Three grant modes × two backends per batch; keeping each batch small keeps each
+  PR's six oracle invocations tractable and keeps a red pass attributable.
+- **Coverage value front-loaded.** 3a+3b deliver the load/store core (MOVEA + reg↔mem) — the most common
+  real-code MOVE shapes — first; mem→mem and `(d16,An)` (rarer, heavier) follow.
+
+**Alternative considered (size-major, 3 batches: byte / word / long):** rejected as the *primary* axis —
+it bundles the write-primitive edit, the two-EA composition, and MOVEA into the first (byte/word) batch,
+re-creating the "five suspects at once" problem the split exists to avoid. The size axis is still present
+*within* the recommended split (3b/3c are single-access; 3d is long), but subordinate to the
+mechanism-isolation axis. **Byte fold note:** byte forms reuse O-mem-2's proven `byte_lane==1` access
+unchanged, so they ride along in 3b/3c (and 3e) as the byte siblings of each word form rather than a
+separate batch; if a reviewer prefers, byte can instead be a trailing 3f — Planner's discretion, the
+mechanism is identical either way.
+
+**Sequencing rule for the Planner:** 3a first (no primitive edit; proves long-read + latch). 3b second
+(the one primitive edit, reviewed in isolation). 3c→3d→3e thereafter; 3c and 3e are independent given
+3b, 3d depends on 3a (long read) + 3b/3c (composition). Each batch: extend the generator's bus-step
+coverage to the batch's `{value,mask}` set (additive; empty diff on existing generated files), add the
+gated dispatch arms, add/extend the emitter, run all three oracle passes + coverage + benchmark. Any
+form whose timing/flags don't match goes straight back to `cfunc_` (never approximated).
+
+### M5. Oracle continuity — gate carries over; the long-form intermediate boundaries (OQ-10: **by-construction, no sweep** — owner-decided 2026-06-28)
+
+**Gate continuity (confirmed, no change).** Every O-mem-3 access goes through `m_program.read_interruptible`
+(data read), `m_program.write_interruptible` (data write), or `m_opcodes.read_interruptible` (prefetch) —
+verified across `move_w_ais_aid_df`, `move_l_ais_aid_df`, `move_w_das_aid_df`, `move_w_ais_dad_df`,
+`movea_w/l_ais_ad_df`. Under `drc_native_mem_ea_allowed()` (`m68000.cpp:80-87`) all four `m_s_*` resolve
+to the same `address_space` and `m_mmu == nullptr`, so `SPACE_PROGRAM` is correct for prefetch, data
+read, and data write in both `SR_S` modes — **no new gate clause, no `SR_S` runtime branch**. Each
+O-mem-3 dispatch arm is wrapped in `if (drc_native_mem_ea_allowed()) { … }` exactly as the O-mem-1/2
+arms (`m68000drc.cpp:270,288`). MMU-attach safety is already discharged by the O-mem-2 OQ-9 fix
+(`m_cache_dirty` on `set_current_mmu`/`enable_mmu`).
+
+**The three grant modes and what they cover for a long form.** Take a long mem→mem MOVE (5 accesses,
+substates 1/2…9/10, `length ≈ 20`):
+
+- **1-cycle pass** — grants 1 → native runs access 1 (read-high), suspends at substate 2, yields;
+  interpreter does the rest. Validates native **step 1 + the suspend handoff** only.
+- **full-grant pass** (`CPUORACLE_M68_DRC_FULLGRANT`, grants `length`) — native runs **all 5 accesses**
+  (both reads, both writes, prefetch); the last access hits `m_icount == 0` → completed-substate yield →
+  interpreter retires. Validates **every native bus access** (incl. both long writes, their RAM, the
+  split flags, the cycle charges). The bus-free native **retire** lambda is the only residual (W4).
+- **partial-grant pass** (`CPUORACLE_M68_DRC_PARTGRANT`, grants `length-4` — verified
+  `cpu_test_harness.cpp:406-411`) — native runs all but the **last** access, suspends one access before
+  the end, interpreter resumes from there. For this long form, `length-4` runs accesses 1–4 (both reads,
+  **both writes**) and resumes the interpreter at access 5 (the **prefetch**, substate 9).
+
+**The gap (the question the brief raises, answered):** the partial-grant pass uses a **single fixed
+offset** (`length-4`), so it lands the mid-instruction resume at exactly **one** boundary — the
+second-to-last access. For O-mem-2's RMW that happened to be the *most* interesting boundary (resume at
+the write, substate 7, validating the native left `m_aluo`/`m_dbout` correct). **But for a long form the
+fixed `length-4` resumes at the final prefetch — AFTER both long writes have already run natively.** It
+does **not** land a suspend between **read-high and read-low** (substate 2→3, where the native must have
+latched `m_alue`/`m_alub` for the interpreter to resume the low read) nor between **write-high and
+write-low** (substate 6→7, where the native first-write state must have left `m_aluo`/`m_alub`/`m_dbout`
+exactly as the interpreter's `mmrl1` so the interpreter's resumed `mmrl2` writes the correct low word
+and accumulates Z). Those intermediate resume boundaries — which exist **only** for the multi-access
+(long) forms and carry the most cross-step scratch state (`m_alue`/`m_alub`/`m_aluo`) — are validated
+today **only by construction** (the emitter mirrors the handler's same-substate field writes and the
+substate is single-sourced), with **no direct oracle coverage** of the interpreter actually resuming
+there. Per OQ-1 the native never resumes itself, so a wrong scratch value at an intermediate substate is
+exactly the failure class the partial-grant pass exists to catch — and the fixed offset misses it for
+long forms.
+
+**Decision (design pinned; one parameter for the owner — OQ-10).** Extend the **existing** partial-grant
+pass to **sweep the first-grant size across each access boundary** (grant `length-4`, `length-8`,
+`length-12`, … `4`, so the suspend lands at substate `2k` for each `k` and the interpreter resumes at
+`2k+1`), rather than only `length-4`. This is **not a new oracle mode** — it is a parameter loop around
+the already-present partial-grant first-grant computation (`first_grant = budget - 4` → `budget - 4*j`
+for `j = 1..accesses-1`), reusing the unchanged snapshot/retire/compare machinery. It makes the
+intermediate long-access resume boundaries first-class oracle-covered for **3a** (long read:
+read-high→read-low handoff) and **3d** (long write: write-high→write-low handoff). It is cheap (a handful
+of extra grant sizes per long case) and attributable. **OQ-10 is the owner's call on whether to require
+the full sweep as a blocking gate for 3a/3d, or accept the single-offset partial-grant + full-grant +
+by-construction argument for the intermediate boundaries** (the residual is bounded and mirrors the
+O-mem-2/`moveq` resume-by-interpreter precedent). **RESOLVED (owner-decided 2026-06-28): do NOT add the
+sweep — accept the by-construction residual (see OQ-10 below).** All batches, including the long 3a/3d,
+gate on the existing **1-cycle + full-grant + single-offset (`length-4`) partial-grant** passes; the
+intermediate long-access resume boundaries (read-high→read-low, write-high→write-low) are covered by
+construction (bounded; mirrors the OQ-1 precedent). **No oracle change is needed for O-mem-3** (the
+three grant modes already in `cpu_test_harness.cpp` suffice).
+
+### M6. Merge-gate guidance for each O-mem-3 sub-batch (what the Planner should encode)
+
+Each O-mem-3a…3e PR merges only on **all** of (mirroring O-mem-2, with the long-sweep delta):
+
+1. **Dual-leg flat-RAM oracle GREEN, 1-cycle pass** (Leg A unchanged; Leg B register/flag/RAM/**cycle**
+   exact), x64 (`drcbex64`) + C (`drcbec` via `CPUORACLE_M68_DRC_C=1`); arm64 on the CI matrix.
+2. **Full-grant Leg-B pass GREEN** (`CPUORACLE_M68_DRC_FULLGRANT=1`), x64 + C — the gate that exercises
+   the native **data write(s)** and (for long) both word writes + split flags. **Blocking.**
+3. **Partial-grant Leg-B pass GREEN** (`CPUORACLE_M68_DRC_PARTGRANT=1`, single `length-4` offset),
+   x64 + C — the mid-instruction resume handoff. **(OQ-10 resolved owner-decided 2026-06-28: no
+   parameterized sweep; all batches incl. the long 3a/3d use the single `length-4` offset; the
+   intermediate long-access boundaries are covered by construction.)**
+4. **`AS_OPCODES` differential oracle GREEN** (`[m68000][drc][asopcodes]`, the O-mem-2 Task-0 config) —
+   the gate keeps `AS_OPCODES`/user-space/MMU machines on `cfunc_` and the fallback matches. MOVE/MOVEA
+   read+write data via `m_program` and prefetch via `m_opcodes`, so this is the same gate-validation as
+   O-mem-2 with no new config beyond the batch's opcodes.
+5. **Gate-predicate + coverage + MMU-regen tests GREEN** (`[m68000][drc][gate]`): the native-coverage
+   assertion extended so each newly-native MOVE/MOVEA form in the batch asserts native-dispatched; the
+   OQ-9 MMU-regen test still green.
+6. **Generator additivity** — regenerating leaves the existing committed files byte-identical; only
+   `m68000-drcdesc.ipp` grows (the batch's new MOVE/MOVEA runs — word/long `DATA_READ`/`DATA_WRITE` rows
+   with `byte_lane=0`/`has_addr_error=1`, and for long the two-word-per-side step sequences), all
+   single-sourced from the microcode walk (OQ-2). **No new `step.kind`, no new descriptor field.**
+7. **Code review clean** + the **appserver Linux `oracle` job GREEN** (Windows-green is
+   necessary-not-sufficient — boundary M passed Windows, failed Linux SysV twice on `offset_from_rbp`;
+   audit every new UML operand for a stray `mem(&field)`). Confirm the Linux `oracle` job runs the
+   full-grant **and** partial-grant (incl. the sweep for long) legs — a pass that never runs in CI is
+   not a gate.
+8. **Throughput bench re-run on a gate-eligible, flat-topology driver** where memory-EA MOVE is hot —
+   **not** an FD1094/`AS_OPCODES` set (those run `cfunc_` and show no speedup, per the §5 addendum's
+   honest-number note). **Known environment gap (flag, do not hard-gate on it):** the throughput bench
+   has been blocked in this environment by absent ROMs; treat it as evidence-when-available, not a
+   blocking gate — the correctness gates (1–7) gate merge.
+
+### Pinned here vs. derive-from-handler (Planner/Builder)
+
+**Pinned by this addendum (do not re-derive):** no new `step.kind` / descriptor field; word = single
+word step with `byte_lane=0`; long = two word steps per side, high-then-low, each with its own
+charge/substate-pair and `has_addr_error=1`; the address-error-after-write is already supported (shared
+branch, keyed on `has_addr_error`); the **one** primitive edit is the write branch honoring
+`byte_lane==0` → full-word `UML_WRITE`; `(d16,An)` = one extra prefetch step + `ext32(d16)+An` setup;
+MOVE flags = `sr_nzvc` (single-access) / `sr_nzvc`+`sr_nz_u` (long), computed at the dest-write setup
+*before* the write; MOVEA = register write-back (`ext32` `.w` / `set_16h`+`set_16l` `.l`), no flags, no
+data-write step; the gate (`drc_native_mem_ea_allowed()`) covers O-mem-3 unchanged; the 5-sub-batch
+split and order. **(OQ-10 resolved owner-decided 2026-06-28: no partial-grant sweep — the long batches
+gate on the single-offset partial-grant + full-grant; the intermediate long-access boundaries are
+covered by construction.)**
+
+**Builder/Planner derive from the `_df` handlers (line-by-line, R-A is the top risk):** the exact
+per-state architectural-field choreography (`m_aob`/`m_at`/`m_au`/`m_pc`/`m_ir`/`m_irc` advances per
+substate); the exact scratch-register dataflow for long (`m_alue`/`m_alub`/`m_aluo` carry high word →
+both writes) and for the `(d16,An)` **dest** (the d16-capture to `m_aluo` before the source read clobbers
+`m_dbin`); the precise `sr_*`/`m_isr` flag-op sequence vs a validated direct N/Z computation; the
+auto-inc/dec delta per size (`2`/`4`, no A7 byte exception) and writeback ordering per side; every
+`{value,mask}` confirmed against each handler's `// xxxx ffff` comment; the substate numbers and charges
+emitted by the generator (never hand-typed). The exact form roster per sub-batch (the in-scope ~88
+split into 3a…3e) is the Planner's to enumerate from the handler table within the cut-lines above.
+
+### Open question — RESOLVED (owner-decided 2026-06-28)
+
+- **OQ-10 — parameterized partial-grant sweep for the long (multi-access) forms → RESOLVED: accept the
+  by-construction residual; do NOT add the sweep (owner-decided 2026-06-28).** The owner decided **not**
+  to add the parameterized partial-grant sweep. The long-word batches (**3a**, **3d**) are gated by the
+  existing **1-cycle + full-grant + single-offset (`length-4`) partial-grant** Leg-B passes (x64 + C),
+  exactly as the single-access batches. The **intermediate** mid-long-access resume boundaries
+  (read-high→read-low for 3a; write-high→write-low for 3d — the `m_alue`/`m_alub`/`m_aluo` handoffs)
+  remain covered **by construction**: the native emitter mirrors the handler's same-substate field
+  writes and the substate numbers are single-sourced from the generator, so the residual is bounded and
+  mirrors the **OQ-1 interpreter-resume precedent** (the same by-construction argument already accepted
+  for every mid-instruction resume). The full-grant pass still exercises every native access (incl. both
+  long reads/writes and the latch dataflow) in one native pass; the single-offset partial-grant still
+  exercises the second-to-last-access resume. **No oracle change is required for O-mem-3** — the three
+  grant modes already present in `cpu_test_harness.cpp` suffice. This was the **only** open decision;
+  M1–M6 and the gate/scope are settled. (All O-mem-3 choices — the split, the primitive edit,
+  `(d16,An)`, MOVEA, flags — are pinned above for the Planner.)
