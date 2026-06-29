@@ -129,6 +129,10 @@ public:
 	// # of gated memory-EA dispatch arms emitted in the last resident-block build
 	// (0 => the btst-absolute arm was gated out).  Overridden by oracle_m68000_device.
 	virtual uint32_t oracle_native_arm_emit_count() const { return 0; }
+	// OQ-9 regen test: attach (true) / detach (false) a stub MMU at runtime via
+	// set_current_mmu(), which must dirty the DRC cache so the gate re-evaluates on the
+	// next resident-block build.  Overridden by oracle_m68000_device; no-op otherwise.
+	virtual void oracle_set_test_mmu(bool attach) { }
 };
 
 // Describes one CPU core: how to register its driver and how to translate
@@ -201,6 +205,8 @@ public:
 	bool native_mem_ea_allowed() const;
 	// # of gated memory-EA dispatch arms emitted in the last resident-block build.
 	uint32_t native_arm_emit_count() const;
+	// OQ-9 regen test: attach/detach a stub MMU at runtime (via set_current_mmu()).
+	void set_test_mmu(bool attach);
 
 	// Reset the CPU to a clean, between-instructions boundary.
 	void reset_cpu();

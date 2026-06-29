@@ -352,6 +352,22 @@ oracle_m6502_device::oracle_m6502_device(const machine_config &mconfig, const ch
 //  `length` (corpus bus-cycle count) -- this identity IS the documented adapter;
 //  no fudge factor is applied.
 
+// Trivial no-op MMU for the OQ-9 regen test.  Attaching it via set_current_mmu()
+// flips drc_native_mem_ea_allowed() false (its only observable effect is m_mmu !=
+// nullptr); translation is never actually exercised by the test.
+class harness_noop_mmu : public m68000_device::mmu
+{
+public:
+	virtual u16 read_program(offs_t, u16) override { return 0; }
+	virtual void write_program(offs_t, u16, u16) override { }
+	virtual u16 read_data(offs_t, u16) override { return 0; }
+	virtual void write_data(offs_t, u16, u16) override { }
+	virtual u16 read_cpu(offs_t, u16) override { return 0; }
+	virtual void set_super(bool) override { }
+	virtual bool translate(int, int, offs_t &, address_space *&) override { return false; }
+};
+static harness_noop_mmu s_harness_noop_mmu;
+
 class oracle_m68000_device : public m68000_device, public cpuoracle::oracle_stepper
 {
 public:
@@ -593,6 +609,14 @@ public:
 	// Both members are protected in m68000_device -- reachable from this subclass.
 	virtual bool oracle_native_mem_ea_allowed() const override { return drc_native_mem_ea_allowed(); }
 	virtual uint32_t oracle_native_arm_emit_count() const override { return m_drc_native_mem_ea_arms; }
+
+	// OQ-9: attach/detach a stub MMU at runtime via set_current_mmu() (public on
+	// m68000_device).  The fix under test sets m_cache_dirty so the resident block
+	// regenerates and drc_native_mem_ea_allowed() re-evaluates on the next build.
+	virtual void oracle_set_test_mmu(bool attach) override
+	{
+		set_current_mmu(attach ? &s_harness_noop_mmu : nullptr);
+	}
 
 	// Boundary L scopes the m68000 DRC arm to type()==M68000 only.  This oracle
 	// device IS a plain 68000 (it derives directly from m68000_device with no
@@ -1357,6 +1381,12 @@ bool cpu_test_harness::native_mem_ea_allowed() const
 uint32_t cpu_test_harness::native_arm_emit_count() const
 {
 	return m_stepper ? m_stepper->oracle_native_arm_emit_count() : 0;
+}
+
+void cpu_test_harness::set_test_mmu(bool attach)
+{
+	if(m_stepper)
+		m_stepper->oracle_set_test_mmu(attach);
 }
 
 void cpu_test_harness::reset_cpu()

@@ -1276,3 +1276,38 @@ TEST_CASE("m68000 DRC native memory-EA space-topology gate", "[cpu][m68000][drc]
 	probe(m68000_userspace_core_descriptor(),  false);  // AS_USER_PROGRAM: gate FALSE
 	probe(m68000_mmu_core_descriptor(),        false);  // MMU attached: gate FALSE
 }
+
+// OQ-9 (ADR 0007 Addendum): set_current_mmu()/enable_mmu() must dirty the DRC cache
+// so the resident block regenerates and drc_native_mem_ea_allowed() re-evaluates when
+// an MMU is attached/detached AFTER the block was first emitted (Apple Lisa / Sun-1 /
+// SGI pm2 attach a custom MMU to a type()==M68000 CPU).  Attach an MMU post-emit and
+// assert the native arm drops out; detach and assert it returns.
+TEST_CASE("m68000 DRC native memory-EA gate re-evaluates on MMU attach (OQ-9)", "[cpu][m68000][drc][gate]")
+{
+	using namespace cpuoracle;
+
+	cpu_test_harness h(m68000_core_descriptor());   // flat bus -> gate true at start
+	h.set_drc(true);                                // engage the DRC so the block is emitted
+	bool ran = h.run_with_machine([&]
+	{
+		REQUIRE(h.drc_engaged());                       // anti-vacuity: DRC really on
+		// flat bus: gate true, native memory-EA arms emitted on the first build
+		h.reset_cpu();
+		h.step_one_instruction(64);                     // force resident-block emission
+		CHECK(h.native_mem_ea_allowed());
+		CHECK(h.native_arm_emit_count() > 0);
+		// attach an MMU AFTER the block was emitted: set_current_mmu() dirties the
+		// cache (the OQ-9 fix), the predicate flips immediately, and the NEXT build
+		// drops the native arm so dispatch falls to cfunc_.
+		h.set_test_mmu(true);
+		CHECK_FALSE(h.native_mem_ea_allowed());          // predicate re-evaluates now
+		h.step_one_instruction(64);                      // regenerates (m_cache_dirty)
+		CHECK(h.native_arm_emit_count() == 0);
+		// symmetry: detach -> gate true, arm returns on the next build
+		h.set_test_mmu(false);
+		CHECK(h.native_mem_ea_allowed());
+		h.step_one_instruction(64);
+		CHECK(h.native_arm_emit_count() > 0);
+	});
+	REQUIRE(ran);
+}
