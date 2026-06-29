@@ -233,6 +233,13 @@ bool m68000_device::is_native_opcode(u16 opword)
 	case 0x01d0: case 0x01d8: case 0x01e0:   // bset Dn
 		return true;
 	}
+	// O-mem-3a: movea.w/.l (An)/(An)+/-(An),An  (mask 0xf1f8; (d16,An)=0x3068/0x2068 is 3e)
+	switch(opword & 0xf1f8)
+	{
+	case 0x3050: case 0x3058: case 0x3060:   // movea.w (An)/(An)+/-(An)
+	case 0x2050: case 0x2058: case 0x2060:   // movea.l (An)/(An)+/-(An)
+		return true;
+	}
 	return false;
 }
 
@@ -322,6 +329,33 @@ void m68000_device::generate_native_dispatch(drcuml_block &block, uml::code_labe
 			UML_CMP(block, I0, f.value);
 			UML_JMPc(block, COND_NE, lbl_next);                     // not this form -> next test
 			generate_bitop_mem(block, f, lbl_delegate);            // emit the form (suspend yields JMP lbl_delegate from within)
+			UML_JMP(block, lbl_delegate);                          // fully-granted: retired -> hand the tail to the interpreter
+			UML_LABEL(block, lbl_next);
+			m_drc_native_mem_ea_arms++;                            // emission probe (gate test)
+		}
+	}
+
+	// O-mem-3a: movea.w/.l (An)/(An)+/-(An),An -- native ONLY behind the space-topology
+	// gate (ADR 0007 O-mem-3 addendum; M5).  Each arm calls generate_movea_mem with its
+	// form constants; the bus-step run (substates / charges / pre_charge) is single-sourced
+	// from the generator.  (d16,An) (0x3068/0x2068) is deliberately NOT here -- O-mem-3e.
+	if (drc_native_mem_ea_allowed())
+	{
+		static const movea_form k_movea_forms[] = {
+			{ 0x3050, 0xf1f8, MEA_AIS,  MEA_W },
+			{ 0x3058, 0xf1f8, MEA_AIPS, MEA_W },
+			{ 0x3060, 0xf1f8, MEA_PAIS, MEA_W },
+			{ 0x2050, 0xf1f8, MEA_AIS,  MEA_L },
+			{ 0x2058, 0xf1f8, MEA_AIPS, MEA_L },
+			{ 0x2060, 0xf1f8, MEA_PAIS, MEA_L },
+		};
+		for(const movea_form &f : k_movea_forms)
+		{
+			uml::code_label const lbl_next = m_drc_labelnum++;
+			UML_AND(block, I0, I7, f.mask);
+			UML_CMP(block, I0, f.value);
+			UML_JMPc(block, COND_NE, lbl_next);                    // not this form -> next test
+			generate_movea_mem(block, f, lbl_delegate);           // emit the form (suspend yields JMP lbl_delegate from within)
 			UML_JMP(block, lbl_delegate);                          // fully-granted: retired -> hand the tail to the interpreter
 			UML_LABEL(block, lbl_next);
 			m_drc_native_mem_ea_arms++;                            // emission probe (gate test)
@@ -1058,4 +1092,251 @@ void m68000_device::generate_bitop_mem(drcuml_block &block, const struct bitop_f
 
 	// ===== retire =====
 	retire();
+}
+
+
+//-------------------------------------------------
+//  generate_movea_mem - native UML for
+//  movea.w/.l (An)/(An)+/-(An),An   (O-mem-3a, 6 forms)
+//
+//  Mirrors movea_{w,l}_{ais,aips,pais}_ad_df in m68000-sdf.cpp.  One
+//  parameterized emitter; EA/size are compile-time constants.
+//    word: EA setup -> data read -> final-prefetch(+reg writeback) -> retire  (2 reads)
+//    long: EA setup -> read-HI -> latch m_alue + read-LO setup -> read-LO ->
+//          final-prefetch(+reg writeback) -> retire                           (3 reads)
+//  The destination is an ADDRESS register, so there is NO data-write bus step and
+//  NO flags.  Write-back: word = m_da[rx] = ext32(m_dbin); long = (m_alue<<16) |
+//  (m_dbin & 0xffff) (set_16h high word + set_16l low word, both before the final
+//  prefetch read -- no suspend between them).  All reads go through the frozen
+//  generate_bus_step() read path (byte_lane=0 word read, has_addr_error=1); this
+//  emitter does NOT touch generate_bus_step() (M1).
+//
+//  CRITICAL (R-A): MOVEA's handler decodes rx/ry from m_irdi, and the DRC entry
+//  point does NOT latch m_irdi (static_generate_entry_point only checks the three
+//  guards + loads I7=m_ird).  This emitter therefore STORES m_irdi=m_ird FIRST, so
+//  the interpreter's PARTIAL handler reads the correct m_irdi when it resumes after
+//  a mid-instruction yield.  rx/ry are decoded from I7 (== m_ird == m_irdi here).
+//
+//  Substates/charges/pre_charge come from the generated run -- never hard-coded.
+//  The -(An) predecrement internal -2 is folded onto the first read's pre_charge by
+//  the generator, so it is NOT charged here.  m_dcr/m_alub and the handler's by-value
+//  alu_and() calls are DEAD for MOVEA (uncompared scratch) and intentionally omitted;
+//  m_alue IS load-bearing (it feeds set_16h into the compared An).  I7 holds m_ird
+//  (the opword), preserved across generate_bus_step.
+//-------------------------------------------------
+
+void m68000_device::generate_movea_mem(drcuml_block &block, const struct movea_form &form, uml::code_label lbl_delegate)
+{
+	// locate this form's generated bus-step run by {value, mask} (mirrors generate_bitop_mem).
+	auto find_run = [](u16 value, u16 mask) -> const drc_bus_run & {
+		for(const drc_bus_run &r : s_drc_bus_run_table)
+			if(r.value == value && r.mask == mask)
+				return r;
+		return s_drc_bus_run_table[0]; // unreachable for the wired opcodes
+	};
+	const drc_bus_run &run = find_run(form.value, form.mask);
+	u16 si = run.first;                 // running index into s_drc_bus_step_table for THIS run
+	const bool is_long = (form.size == MEA_L);
+
+	// m_base_ssw helpers
+	auto ssw_data = [&]() {
+		UML_MOV(block, I0, u32(u16(SSW_DATA | SSW_R)));
+		UML_STORE(block, &m_base_ssw, 0, I0, SIZE_WORD, SCALE_x1);
+	};
+	auto ssw_program = [&]() {
+		UML_MOV(block, I0, u32(u16(SSW_PROGRAM | SSW_R)));
+		UML_STORE(block, &m_base_ssw, 0, I0, SIZE_WORD, SCALE_x1);
+	};
+	// m_dbin = m_edb
+	auto commit_dbin = [&]() {
+		UML_LOAD(block, I0, &m_edb, 0, SIZE_WORD, SCALE_x1);
+		UML_STORE(block, &m_dbin, 0, I0, SIZE_WORD, SCALE_x1);
+	};
+	// ry = map_sp((m_irdi & 7) | 8) -> I6 : (op&7)==7 ? m_sp : (op&7)|8.  Decoded
+	// from I7 (== m_irdi after the latch).  Consumed before the first clobbering read;
+	// recomputed in the long (An)+ read-low block (read-HI clobbered I6).
+	auto load_ry = [&]() {
+		uml::code_label const lbl_a7 = m_drc_labelnum++;
+		uml::code_label const lbl_done = m_drc_labelnum++;
+		UML_AND(block, I6, I7, 7);
+		UML_CMP(block, I6, 7);
+		UML_JMPc(block, COND_E, lbl_a7);
+			UML_OR(block, I6, I6, 8);                                 // A0..A6 -> (op&7)|8
+			UML_JMP(block, lbl_done);
+		UML_LABEL(block, lbl_a7);
+			UML_LOAD(block, I6, &m_sp, 0, SIZE_DWORD, SCALE_x1);      // A7 -> m_sp (15 or 16)
+		UML_LABEL(block, lbl_done);
+	};
+	// rx = map_sp(((m_irdi >> 9) & 7) | 8) -> dst (the dest An index).  Recomputed at
+	// the write-back (after the reads), from the preserved I7; m_sp is stable across MOVEA.
+	auto load_rx = [&](uml::parameter dst) {
+		uml::code_label const lbl_a7 = m_drc_labelnum++;
+		uml::code_label const lbl_done = m_drc_labelnum++;
+		UML_SHR(block, dst, I7, 9);
+		UML_AND(block, dst, dst, 7);                                  // (op>>9)&7
+		UML_CMP(block, dst, 7);
+		UML_JMPc(block, COND_E, lbl_a7);
+			UML_OR(block, dst, dst, 8);
+			UML_JMP(block, lbl_done);
+		UML_LABEL(block, lbl_a7);
+			UML_LOAD(block, dst, &m_sp, 0, SIZE_DWORD, SCALE_x1);
+		UML_LABEL(block, lbl_done);
+	};
+
+	// ---- THE LATCH: m_irdi = m_ird  (load-bearing for the interpreter's resume) ----
+	UML_STORE(block, &m_irdi, 0, I7, SIZE_WORD, SCALE_x1);
+
+	if(!is_long)
+	{
+		// ===== WORD MOVEA (2 reads): EA/data-read setup =====
+		load_ry();
+		switch(form.ea)
+		{
+		case MEA_AIS:   // adrw1: m_aob = m_at = m_da[ry]   (m_au untouched)
+			UML_LOAD(block, I0, &m_da[0], I6, SIZE_DWORD, SCALE_x4);
+			UML_STORE(block, &m_aob, 0, I0, SIZE_DWORD, SCALE_x1);
+			UML_STORE(block, &m_at, 0, I0, SIZE_DWORD, SCALE_x1);
+			break;
+		case MEA_AIPS:  // pinw1: m_aob=m_at=m_da[ry](old); m_au=old+2; pinw2: m_da[ry]=m_au; m_au=m_pc+2
+			UML_LOAD(block, I0, &m_da[0], I6, SIZE_DWORD, SCALE_x4);  // old m_da[ry]
+			UML_STORE(block, &m_aob, 0, I0, SIZE_DWORD, SCALE_x1);    // m_aob = old (the read addr)
+			UML_STORE(block, &m_at, 0, I0, SIZE_DWORD, SCALE_x1);
+			UML_ADD(block, I1, I0, 2);                                // m_au = old + 2 (pinw1)
+			UML_STORE(block, &m_au, 0, I1, SIZE_DWORD, SCALE_x1);
+			UML_STORE(block, &m_da[0], I6, I1, SIZE_DWORD, SCALE_x4); // m_da[ry] = m_au (pinw2, post-inc +2)
+			UML_LOAD(block, I2, &m_pc, 0, SIZE_DWORD, SCALE_x1);
+			UML_ADD(block, I2, I2, 2);
+			UML_STORE(block, &m_au, 0, I2, SIZE_DWORD, SCALE_x1);     // m_au = m_pc + 2 (pinw2)
+			break;
+		case MEA_PAIS:  // pdcw1: m_pc=m_au; m_au=m_da[ry]-2 [pre_charge -2]; pdcw2: m_aob=m_at=m_da[ry]=m_au; m_au=m_pc
+			UML_LOAD(block, I0, &m_au, 0, SIZE_DWORD, SCALE_x1);      // entry m_au
+			UML_STORE(block, &m_pc, 0, I0, SIZE_DWORD, SCALE_x1);     // m_pc = m_au (pdcw1)
+			UML_LOAD(block, I1, &m_da[0], I6, SIZE_DWORD, SCALE_x4);
+			UML_SUB(block, I1, I1, 2);                                // m_da[ry] - 2 (the read addr; pdcw1 m_au=...-2)
+			UML_STORE(block, &m_aob, 0, I1, SIZE_DWORD, SCALE_x1);    // m_aob = m_au (pdcw2)
+			UML_STORE(block, &m_at, 0, I1, SIZE_DWORD, SCALE_x1);     // m_at = m_au (pdcw2)
+			UML_STORE(block, &m_da[0], I6, I1, SIZE_DWORD, SCALE_x4); // m_da[ry] = m_au (pdcw2, pre-dec -2)
+			UML_STORE(block, &m_au, 0, I0, SIZE_DWORD, SCALE_x1);     // m_au = m_pc (pdcw2, restore entry m_au)
+			break;
+		}
+		ssw_data();
+		generate_bus_step(block, s_drc_bus_step_table[si++], lbl_delegate);   // data read (substates 1/2; pais pre_charge=2)
+		commit_dbin();                                                        // m_dbin = source word
+
+		// ===== final prefetch setup + ext32 register write-back (mrgm1/mmrw3) =====
+		UML_LOAD(block, I0, &m_au, 0, SIZE_DWORD, SCALE_x1);
+		UML_STORE(block, &m_aob, 0, I0, SIZE_DWORD, SCALE_x1);                // m_aob = m_au
+		UML_STORE(block, &m_pc, 0, I0, SIZE_DWORD, SCALE_x1);                 // m_pc = m_au
+		UML_LOAD(block, I1, &m_irc, 0, SIZE_WORD, SCALE_x1);
+		UML_STORE(block, &m_ir, 0, I1, SIZE_WORD, SCALE_x1);                  // m_ir = m_irc
+		load_rx(I5);                                                          // I5 = dest An index
+		UML_LOAD(block, I2, &m_dbin, 0, SIZE_WORD, SCALE_x1);
+		UML_SEXT(block, I2, I2, SIZE_WORD);                                   // ext32(m_dbin) = s32(s16(word))
+		UML_STORE(block, &m_da[0], I5, I2, SIZE_DWORD, SCALE_x4);             // m_da[rx] = ext32(m_dbin)
+		UML_ADD(block, I0, I0, 2);
+		UML_STORE(block, &m_au, 0, I0, SIZE_DWORD, SCALE_x1);                 // m_au += 2
+		UML_STORE(block, &m_ird, 0, I1, SIZE_WORD, SCALE_x1);                 // m_ird = m_ir (== old m_irc, in I1)
+		UML_LOAD(block, I2, &m_next_state, 0, SIZE_DWORD, SCALE_x1);
+		UML_LOAD(block, I3, &m_int_next_state, 0, SIZE_DWORD, SCALE_x1);
+		UML_CMP(block, I2, u32(S_TRACE));
+		UML_MOVc(block, COND_NE, I2, I3);                                     // (next != S_TRACE) ? int_next : kept
+		UML_STORE(block, &m_next_state, 0, I2, SIZE_DWORD, SCALE_x1);
+		ssw_program();
+		generate_bus_step(block, s_drc_bus_step_table[si++], lbl_delegate);   // final prefetch (substates 3/4)
+	}
+	else
+	{
+		// ===== LONG MOVEA (3 reads): read-HIGH setup =====
+		load_ry();
+		switch(form.ea)
+		{
+		case MEA_AIS:   // adrl1: m_aob = m_da[ry]; m_au = m_da[ry] + 2
+		case MEA_AIPS:  // pinl1: identical to adrl1
+			UML_LOAD(block, I0, &m_da[0], I6, SIZE_DWORD, SCALE_x4);
+			UML_STORE(block, &m_aob, 0, I0, SIZE_DWORD, SCALE_x1);            // m_aob = m_da[ry] (read-HI addr)
+			UML_ADD(block, I1, I0, 2);
+			UML_STORE(block, &m_au, 0, I1, SIZE_DWORD, SCALE_x1);             // m_au = m_da[ry] + 2
+			break;
+		case MEA_PAIS:  // pdcl1: m_au=m_da[ry]-4 [pre_charge -2]; pdcl2: m_aob=m_da[ry]=m_au; m_au=m_au+2
+			UML_LOAD(block, I0, &m_da[0], I6, SIZE_DWORD, SCALE_x4);
+			UML_SUB(block, I1, I0, 4);                                        // m_da[ry] - 4 (pdcl1 m_au)
+			UML_STORE(block, &m_aob, 0, I1, SIZE_DWORD, SCALE_x1);            // m_aob = m_au (pdcl2, read-HI addr)
+			UML_STORE(block, &m_da[0], I6, I1, SIZE_DWORD, SCALE_x4);         // m_da[ry] = m_au (pdcl2, pre-dec -4)
+			UML_ADD(block, I2, I1, 2);
+			UML_STORE(block, &m_au, 0, I2, SIZE_DWORD, SCALE_x1);             // m_au = m_au + 2 (pdcl2)
+			break;
+		}
+		ssw_data();
+		generate_bus_step(block, s_drc_bus_step_table[si++], lbl_delegate);   // read HIGH (substates 1/2; pais pre_charge=2)
+		commit_dbin();                                                        // m_dbin = HIGH word
+
+		// ===== read-LOW setup: m_aob=m_au; LATCH m_alue=m_dbin; m_at=m_au; (aips: m_da[ry]+=4); m_au=m_pc+2 =====
+		UML_LOAD(block, I0, &m_au, 0, SIZE_DWORD, SCALE_x1);                  // I0 = m_au (= read-LO addr)
+		UML_STORE(block, &m_aob, 0, I0, SIZE_DWORD, SCALE_x1);                // m_aob = m_au
+		UML_STORE(block, &m_at, 0, I0, SIZE_DWORD, SCALE_x1);                 // m_at = m_au
+		UML_LOAD(block, I2, &m_dbin, 0, SIZE_WORD, SCALE_x1);
+		UML_STORE(block, &m_alue, 0, I2, SIZE_WORD, SCALE_x1);                // m_alue = HIGH word (LOAD-BEARING latch)
+		if(form.ea == MEA_AIPS)
+		{
+			// pinl2: m_au = m_au + 2 (= m_da[ry]+4); pinl3: m_da[ry] = m_au (post-inc +4)
+			UML_ADD(block, I1, I0, 2);                                        // I1 = m_da[ry] + 4
+			UML_STORE(block, &m_au, 0, I1, SIZE_DWORD, SCALE_x1);             // m_au = m_au + 2 (pinl2)
+			load_ry();                                                        // recompute ry (read-HI clobbered I6)
+			UML_STORE(block, &m_da[0], I6, I1, SIZE_DWORD, SCALE_x4);         // m_da[ry] = m_au (pinl3, +4)
+		}
+		UML_LOAD(block, I3, &m_pc, 0, SIZE_DWORD, SCALE_x1);
+		UML_ADD(block, I3, I3, 2);
+		UML_STORE(block, &m_au, 0, I3, SIZE_DWORD, SCALE_x1);                 // m_au = m_pc + 2
+		ssw_data();
+		generate_bus_step(block, s_drc_bus_step_table[si++], lbl_delegate);   // read LOW (substates 3/4)
+		commit_dbin();                                                        // m_dbin = LOW word (m_alue still HIGH)
+
+		// ===== final prefetch setup + set_16h/set_16l register write-back (mrgl1/mrgl2) =====
+		UML_LOAD(block, I0, &m_au, 0, SIZE_DWORD, SCALE_x1);
+		UML_STORE(block, &m_aob, 0, I0, SIZE_DWORD, SCALE_x1);                // m_aob = m_au
+		UML_STORE(block, &m_pc, 0, I0, SIZE_DWORD, SCALE_x1);                 // m_pc = m_au
+		UML_LOAD(block, I1, &m_irc, 0, SIZE_WORD, SCALE_x1);
+		UML_STORE(block, &m_ir, 0, I1, SIZE_WORD, SCALE_x1);                  // m_ir = m_irc
+		load_rx(I5);                                                          // I5 = dest An index
+		UML_LOAD(block, I2, &m_alue, 0, SIZE_WORD, SCALE_x1);                 // HIGH word (zero-extended u16)
+		UML_SHL(block, I2, I2, 16);                                           // << 16
+		UML_LOAD(block, I3, &m_dbin, 0, SIZE_WORD, SCALE_x1);                 // LOW word (zero-extended u16)
+		UML_OR(block, I2, I2, I3);                                            // (m_alue<<16) | (m_dbin & 0xffff)
+		UML_STORE(block, &m_da[0], I5, I2, SIZE_DWORD, SCALE_x4);             // m_da[rx] = set_16h(HIGH)+set_16l(LOW)
+		UML_ADD(block, I0, I0, 2);
+		UML_STORE(block, &m_au, 0, I0, SIZE_DWORD, SCALE_x1);                 // m_au += 2
+		UML_STORE(block, &m_ird, 0, I1, SIZE_WORD, SCALE_x1);                 // m_ird = m_ir (== old m_irc, in I1)
+		UML_LOAD(block, I2, &m_next_state, 0, SIZE_DWORD, SCALE_x1);
+		UML_LOAD(block, I3, &m_int_next_state, 0, SIZE_DWORD, SCALE_x1);
+		UML_CMP(block, I2, u32(S_TRACE));
+		UML_MOVc(block, COND_NE, I2, I3);                                     // (next != S_TRACE) ? int_next : kept
+		UML_STORE(block, &m_next_state, 0, I2, SIZE_DWORD, SCALE_x1);
+		ssw_program();
+		generate_bus_step(block, s_drc_bus_step_table[si++], lbl_delegate);   // final prefetch (substates 5/6)
+	}
+
+	// ===== retire (byte-identical to generate_btst_imm8_absolute's retire) =====
+	//   m_irc = m_dbin = m_edb; set_ftu_const(); m_inst_state = m_next_state ?
+	//   m_next_state : m_decode_table[m_ird]; if(m_sr & SR_T) m_next_state = S_TRACE.
+	{
+		UML_LOAD(block, I0, &m_edb, 0, SIZE_WORD, SCALE_x1);
+		UML_STORE(block, &m_irc, 0, I0, SIZE_WORD, SCALE_x1);
+		UML_STORE(block, &m_dbin, 0, I0, SIZE_WORD, SCALE_x1);
+		UML_CALLC(block, &m68000_device::cfunc_set_ftu_const, this);          // set_ftu_const() -- single-sourced
+		uml::code_label const lbl_have_next = m_drc_labelnum++;
+		uml::code_label const lbl_no_trace  = m_drc_labelnum++;
+		UML_LOAD(block, I0, &m_next_state, 0, SIZE_DWORD, SCALE_x1);
+		UML_CMP(block, I0, 0);
+		UML_JMPc(block, COND_NE, lbl_have_next);
+			UML_LOAD(block, I1, &m_ird, 0, SIZE_WORD, SCALE_x1);
+			UML_LOAD(block, I0, m_decode_table.data(), I1, SIZE_WORD, SCALE_x2);
+		UML_LABEL(block, lbl_have_next);
+		UML_STORE(block, &m_inst_state, 0, I0, SIZE_WORD, SCALE_x1);
+		UML_LOAD(block, I2, &m_sr, 0, SIZE_WORD, SCALE_x1);
+		UML_TEST(block, I2, u32(u16(SR_T)));
+		UML_JMPc(block, COND_Z, lbl_no_trace);
+			UML_MOV(block, I3, u32(S_TRACE));
+			UML_STORE(block, &m_next_state, 0, I3, SIZE_DWORD, SCALE_x1);
+		UML_LABEL(block, lbl_no_trace);
+	}
 }

@@ -268,6 +268,16 @@ protected:
 	enum bitop_src    : u8 { BITSRC_IMM8, BITSRC_DN };
 	struct bitop_form { u16 value; u16 mask; u8 family; u8 ea; u8 src; };
 	void generate_bitop_mem(drcuml_block &block, const struct bitop_form &form, uml::code_label lbl_delegate);
+	// O-mem-3a: native MOVEA (An)/(An)+/-(An) -> An, word AND long (6 forms).  One
+	// parameterized emitter; EA/size are compile-time constants in the dispatch table.
+	// Source-EA read via the frozen generate_bus_step() read path (byte_lane=0 word
+	// read); long = two word reads (high then low) with the high word latched in
+	// m_alue; the destination is an ADDRESS register so the write-back is ext32(.w) /
+	// set_16h+set_16l(.l) -- no data-write step, no flags, no generate_bus_step() edit.
+	enum movea_ea   : u8 { MEA_AIS, MEA_AIPS, MEA_PAIS };   // (An), (An)+, -(An)
+	enum movea_size : u8 { MEA_W, MEA_L };                  // word (ext32), long (set_16h+set_16l)
+	struct movea_form { u16 value; u16 mask; u8 ea; u8 size; };
+	void generate_movea_mem(drcuml_block &block, const struct movea_form &form, uml::code_label lbl_delegate); // native MOVEA (An)/(An)+/-(An)->An (O-mem-3a)
 	static bool is_native_opcode(u16 opword);   // the predicate identifying opcodes with a native fast-path
 	void func_interpret_quantum();              // run the interpreter for the granted quantum (the cfunc body)
 	static void cfunc_interpret_quantum(void *param);

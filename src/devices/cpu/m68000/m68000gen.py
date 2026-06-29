@@ -2451,7 +2451,16 @@ def drc_bus_steps(ii):
     REGIND = (DRC_EA_AIND, DRC_EA_AINC, DRC_EA_ADEC)   # (An), (An)+, -(An)
     is_o1 = (base == 'btst' and src_ea == DRC_EA_IMM and dst_ea in (DRC_EA_ABSW, DRC_EA_ABSL))
     is_o2 = (base in BITOPS and src_ea in (DRC_EA_IMM, DRC_EA_DREG) and dst_ea in REGIND)
-    if not (is_o1 or is_o2):
+    # O-mem-3a: MOVEA (An)/(An)+/-(An) -> An, word AND long (6 forms).  movea.b does
+    # not exist, so no size filter is needed; the (d16,An) source 'das' (DRC_EA_DISP)
+    # is deliberately EXCLUDED (that is O-mem-3e), as are the register sources 'ds'
+    # (DREG) / 'as' (AREG) and every absolute/PC/indexed/immediate MOVEA source
+    # (src_ea not in REGIND).  The An destination is 'ad' -> DRC_EA_AREG; only MOVEA
+    # writes an An, so base=='movea' + dst==AREG isolates it.  These forms are all
+    # READS (word/long source-EA read + final prefetch) with NO data-write row; the
+    # long forms are two word reads (high then low) -- byte_lane=0, has_addr_error=1.
+    is_o3a = (base == 'movea' and src_ea in REGIND and dst_ea == DRC_EA_AREG)
+    if not (is_o1 or is_o2 or is_o3a):
         return []
 
     # Re-emit the interpreter handler body exactly as the 'sdf' command does.
@@ -2473,8 +2482,19 @@ def drc_bus_steps(ii):
         is_write = line.startswith('m_program.write_interruptible') or \
                    line.startswith('m_opcodes.write_interruptible')
         if is_read or is_write:
-            # is_data: the data read (m_program byte-lane mask) OR any write (byte-lane).
+            # is_data: the data read (m_program) OR any write -> DATA kind (vs PREFETCH
+            # for an m_opcodes read).  This drives the descriptor KIND only.
             is_data = is_write or line.startswith('m_edb = m_program.read_interruptible')
+
+            # WIDTH of the access (byte_lane / size) is independent of data-vs-prefetch.
+            # O-mem-3 adds the WORD data read (MOVEA / word MOVE): a bare
+            # 'm_program.read_interruptible(m_aob & ~1)' with NO 0x00ff/0xff00 lane mask
+            # -> full word, byte_lane=0, has_addr_error=1.  A byte data read carries the
+            # explicit lane mask (and a '>>= 8' select); the O-mem-2 RMW store is a byte
+            # write by construction (text has no mask, so force it via is_write).  Keying
+            # the width on the lane mask (not is_data) keeps the O-mem-1/2 rows
+            # byte-identical while MOVEA's word read comes out word-sized.
+            is_byte_lane = is_write or (is_read and ('0x00ff' in line or '0xff00' in line))
 
             # The charge is the next 'm_icount -= N;' (skip the optional
             # 'if(!(m_aob & 1)) m_edb >>= 8;' byte-lane select on a data read).
@@ -2546,12 +2566,12 @@ def drc_bus_steps(ii):
                 kind = DRC_BUS_PREFETCH_READ
             steps.append((
                 kind,
-                DRC_SIZE_B if is_data else DRC_SIZE_W,   # byte data read/write; word prefetch
+                DRC_SIZE_B if is_byte_lane else DRC_SIZE_W,  # byte for lane-masked access; word otherwise
                 charge,                                  # the interpreter's -N
                 redo_substate,
                 completed_substate,
-                has_addr_error,                          # 0 for data read AND data write
-                1 if is_data else 0,                     # byte-lane select on data read AND write
+                has_addr_error,                          # word data read/prefetch=1; byte data read/write=0
+                1 if is_byte_lane else 0,                # byte-lane select (byte data read/write only)
                 pending_pre_charge,                      # folded '-(An)' predecrement -2 (0 otherwise)
             ))
             pending_pre_charge = 0
