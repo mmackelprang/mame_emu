@@ -1500,3 +1500,35 @@ TEST_CASE("m68000 DRC native memory-EA gate re-evaluates on MMU attach (OQ-9)", 
 	});
 	REQUIRE(ran);
 }
+
+// O-mem-2 native coverage: every one of the 24 bit-op forms (btst/bchg/bclr/bset
+// x (An)/(An)+/-(An) x #imm8/Dn) is classified native by is_native_opcode(), and
+// representative out-of-scope forms are NOT (so the predicate did not over-match).
+TEST_CASE("m68000 DRC native coverage -- 24 bit-op memory-EA forms", "[cpu][m68000][drc][gate]")
+{
+	using namespace cpuoracle;
+	cpu_test_harness h(m68000_core_descriptor());
+	h.set_drc(true);
+	bool ran = h.run_with_machine([&]
+	{
+		REQUIRE(h.drc_engaged());
+		// the 24 O-mem-2 forms -- one representative encoding per form
+		static const std::uint16_t k_native[] = {
+			0x0810, 0x0818, 0x0820,  0x0850, 0x0858, 0x0860,   // btst/bchg #imm8
+			0x0890, 0x0898, 0x08a0,  0x08d0, 0x08d8, 0x08e0,   // bclr/bset #imm8
+			0x0110, 0x0118, 0x0120,  0x0150, 0x0158, 0x0160,   // btst/bchg Dn
+			0x0190, 0x0198, 0x01a0,  0x01d0, 0x01d8, 0x01e0,   // bclr/bset Dn
+		};
+		for (std::uint16_t op : k_native)
+		{
+			INFO("opword " << std::hex << op);
+			CHECK(h.is_native_opcode(op));
+		}
+		// out-of-scope bit-op EAs must NOT be native (predicate did not over-match):
+		//   bchg #imm8,Dn (0x0840), bchg #imm8,(d16,An) (0x0868), btst Dn,Dn (0x0100)
+		CHECK_FALSE(h.is_native_opcode(0x0840));
+		CHECK_FALSE(h.is_native_opcode(0x0868));
+		CHECK_FALSE(h.is_native_opcode(0x0100));
+	});
+	REQUIRE(ran);
+}

@@ -618,6 +618,10 @@ public:
 		set_current_mmu(attach ? &s_harness_noop_mmu : nullptr);
 	}
 
+	// is_native_opcode is a protected static of m68000_device -- reachable from this
+	// subclass.  Exposes the native-dispatch predicate to the coverage assertion.
+	virtual bool oracle_is_native_opcode(uint16_t opword) const override { return is_native_opcode(opword); }
+
 	// Boundary L scopes the m68000 DRC arm to type()==M68000 only.  This oracle
 	// device IS a plain 68000 (it derives directly from m68000_device with no
 	// behavioural override), so it opts the DRC arm in for its own ORACLE_M68000
@@ -1387,6 +1391,11 @@ void cpu_test_harness::set_test_mmu(bool attach)
 {
 	if(m_stepper)
 		m_stepper->oracle_set_test_mmu(attach);
+}
+
+bool cpu_test_harness::is_native_opcode(uint16_t opword) const
+{
+	return m_stepper ? m_stepper->oracle_is_native_opcode(opword) : false;
 }
 
 void cpu_test_harness::reset_cpu()
