@@ -16,25 +16,7 @@ permissions:
   contents: read
 
 jobs:
-  # Canary: this is a GitHub-hosted-only leg (no appserver fallback -- it can't
-  # run on the Linux self-hosted runner). Run ONLY when the GitHub backend is
-  # active; skip when forced to appserver (CI_FORCE_APPSERVER=true) or when GH
-  # minutes are exhausted (probe can't run) -- skipping rather than burning
-  # credits. See docs/ci/appserver-runner.md.
-  probe-github:
-    if: ${{ vars.CI_FORCE_APPSERVER != 'true' }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    continue-on-error: true
-    outputs:
-      gh_ok: ${{ steps.probe.outputs.gh_ok }}
-    steps:
-    - id: probe
-      run: echo "gh_ok=true" >> "$GITHUB_OUTPUT"
-
   build-docs:
-    needs: probe-github
-    if: ${{ !cancelled() && needs.probe-github.outputs.gh_ok == 'true' }}
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@main
@@ -50,9 +32,11 @@ jobs:
     - name: Build PDF
       run: make -C docs PAPER=a4 latexpdf
     - uses: actions/upload-artifact@main
+      if: ${{ github.event_name == 'push' }}
       with:
         name: mame-docs-${{ github.sha }}
         path: |
           docs/build/html
           docs/build/latex/MAME.pdf
         if-no-files-found: error
+        retention-days: 7
