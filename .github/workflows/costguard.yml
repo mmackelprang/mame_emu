@@ -34,7 +34,10 @@ jobs:
         # Larger-runner label forms: windows-11-arm ; *-large ; *-xlarge ;
         # *-<N>-core(s) (e.g. ubuntu-latest-4-cores). Standard ubuntu/windows/
         # macOS-latest never match.
-        pattern='(windows-11-arm|[a-z0-9_-]+-(large|xlarge)|[a-z0-9_-]+-[0-9]+-cores?)'
+        # Also fails on `self-hosted`: this repo is public, where a self-hosted
+        # runner is a code-execution risk (untrusted fork PRs) and is not a
+        # free standard runner.
+        pattern='(windows-11-arm|self-hosted|[a-z0-9_-]+-(large|xlarge)|[a-z0-9_-]+-[0-9]+-cores?)'
         set +e
         hits=$(grep -rInE --exclude=costguard.yml "$pattern" .github/workflows/)
         rc=$?
