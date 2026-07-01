@@ -26,10 +26,26 @@ jobs:
     - name: Assert no larger/billable runner labels are referenced
       run: |
         set -euo pipefail
-        # Known GitHub larger-runner labels that bill on public repos, plus the
-        # generic *-large / *-xlarge suffix convention. Standard *-latest labels
-        # do not match. Exclude this guard file's own comments from the scan.
-        if grep -rInE 'runs-on:[^#]*(windows-11-arm|[a-z0-9_-]+-(large|xlarge))\b' .github/workflows/ ; then
+        # PUBLIC repo: standard *-latest runners are free & unlimited; LARGER
+        # runners bill even on public repos. Fail if any workflow references a
+        # larger-runner label ANYWHERE -- on a `runs-on:` line OR as a
+        # strategy.matrix `os:` value (closing the matrix-include blind spot).
+        # Exclude this guard file, which names the labels in its own pattern.
+        # Larger-runner label forms: windows-11-arm ; *-large ; *-xlarge ;
+        # *-<N>-core(s) (e.g. ubuntu-latest-4-cores). Standard ubuntu/windows/
+        # macOS-latest never match.
+        pattern='(windows-11-arm|[a-z0-9_-]+-(large|xlarge)|[a-z0-9_-]+-[0-9]+-cores?)'
+        set +e
+        hits=$(grep -rInE --exclude=costguard.yml "$pattern" .github/workflows/)
+        rc=$?
+        set -e
+        # grep exit: 0=match found (FAIL) ; 1=no match (pass) ; >1=error (FAIL,
+        # never silently treat an error as clean).
+        if [ "$rc" -gt 1 ]; then
+          echo "::error::cost guard: grep errored (exit $rc)"; exit 1
+        fi
+        if [ -n "$hits" ]; then
+          printf '%s\n' "$hits"
           echo "::error::A billable/larger runner label is referenced above. Public-repo CI must use only free standard runners (ubuntu/windows/macOS-latest)."
           exit 1
         fi
