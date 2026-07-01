@@ -1,0 +1,36 @@
+name: Cost guard (no billable runners)
+
+# This repo is PUBLIC: standard ubuntu/windows/macOS-latest runners are free and
+# unlimited. The only Actions cost vectors are (a) *larger* runners (billed even
+# on public repos) and (b) storage overage (handled by retention-days elsewhere).
+# This gate fails if any workflow reintroduces a larger/billable runner label.
+
+on:
+  push:
+    branches:
+    - main
+    paths:
+    - '.github/workflows/**'
+  pull_request:
+    paths:
+    - '.github/workflows/**'
+
+permissions:
+  contents: read
+
+jobs:
+  no-billable-runners:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@main
+    - name: Assert no larger/billable runner labels are referenced
+      run: |
+        set -euo pipefail
+        # Known GitHub larger-runner labels that bill on public repos, plus the
+        # generic *-large / *-xlarge suffix convention. Standard *-latest labels
+        # do not match. Exclude this guard file's own comments from the scan.
+        if grep -rInE 'runs-on:[^#]*(windows-11-arm|[a-z0-9_-]+-(large|xlarge))\b' .github/workflows/ ; then
+          echo "::error::A billable/larger runner label is referenced above. Public-repo CI must use only free standard runners (ubuntu/windows/macOS-latest)."
+          exit 1
+        fi
+        echo "cost guard: no billable runner labels found."
