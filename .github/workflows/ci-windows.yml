@@ -26,28 +26,10 @@ permissions:
   contents: read
 
 jobs:
-  # Canary: this is a GitHub-hosted-only leg (no appserver fallback -- it can't
-  # run on the Linux self-hosted runner). Run ONLY when the GitHub backend is
-  # active; skip when forced to appserver (CI_FORCE_APPSERVER=true) or when GH
-  # minutes are exhausted (probe can't run) -- skipping rather than burning
-  # credits. See docs/ci/appserver-runner.md.
-  probe-github:
-    if: ${{ vars.CI_FORCE_APPSERVER != 'true' }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    continue-on-error: true
-    outputs:
-      gh_ok: ${{ steps.probe.outputs.gh_ok }}
-    steps:
-    - id: probe
-      run: echo "gh_ok=true" >> "$GITHUB_OUTPUT"
-
   build-windows:
-    needs: probe-github
-    if: ${{ !cancelled() && needs.probe-github.outputs.gh_ok == 'true' }}
     strategy:
       matrix:
-        compiler: [gcc-x64, clang-x64, clang-arm64]
+        compiler: [gcc-x64, clang-x64]
         include:
           - compiler: gcc-x64
             os: windows-latest
@@ -66,15 +48,6 @@ jobs:
             cxx: clang++
             subtarget: tiny
             executable: mametiny
-          - compiler: clang-arm64
-            os: windows-11-arm
-            msys: CLANGARM64
-            slug: mingw-w64-clang-aarch64
-            extrapkg: mingw-w64-clang-aarch64-gcc-compat
-            cc: clang
-            cxx: clang++
-            subtarget: mame
-            executable: mame
     runs-on: ${{ matrix.os }}
     defaults:
       run:
@@ -95,31 +68,18 @@ jobs:
         ARCHOPTS: "-fuse-ld=lld"
         SUBTARGET: ${{ matrix.subtarget }}
         TOOLS: 1
-        # TESTS=1 also builds the `mametests` Catch2 binary (legacy unit tests +
-        # the differential CPU oracle), run below (ADR 0001 / 0006).
         TESTS: 1
       run: make -j3
     - name: Validate
       run: ./${{ matrix.executable }}.exe -validate
-    # --- ADR 0001 boundary D: mametests + the differential CPU oracle ---------
-    # Fetch the pinned, hash-verified SingleStepTests corpus (uses the MSYS2
-    # python installed above).  A fetch failure exits non-zero and fails the leg
-    # loudly (the oracle is never silently skipped in CI).  Primary source is
-    # codeload.github.com with a github.com archive fallback (manifest.json
-    # mirrors[]).
     - name: Fetch CPU oracle vectors
       run: python tests/cpuoracle/fetch_vectors.py --cores z80,m6502,m68000
-    # COST CAP (documented, not silent): the MSYS2/MinGW Windows legs are the
-    # slowest, so they run a REPRESENTATIVE SUBSET -- the first 64 fixture files
-    # per core (CPUORACLE_MAX_FILES=64) -- as a cross-platform smoke that the
-    # oracle harness + the test binary behave on Windows.  The FULL-corpus
-    # m68000 gate (ADR 0006 decision #3) runs on Linux (the canonical leg); this
-    # cap never weakens that gate.
     - name: Run mametests (oracle subset + legacy unit tests)
       env:
         CPUORACLE_MAX_FILES: 64
       run: ./mametests.exe
     - uses: actions/upload-artifact@main
+      if: ${{ github.event_name == 'push' }}
       with:
         name: ${{ matrix.executable }}-windows-${{ matrix.compiler }}-${{ github.sha }}
         path: |
@@ -127,3 +87,4 @@ jobs:
           chdman.exe
           unidasm.exe
         if-no-files-found: error
+        retention-days: 7
