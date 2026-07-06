@@ -39,7 +39,7 @@ class machine_config;
 class emu_options;
 class osd_interface;
 class machine_manager;
-struct game_driver;
+class game_driver;
 
 
 namespace cpuoracle {
