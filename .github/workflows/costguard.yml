@@ -1,0 +1,55 @@
+name: Cost guard (no billable runners)
+
+# This repo is PUBLIC: standard ubuntu/windows/macOS-latest runners are free and
+# unlimited. The only Actions cost vectors are (a) *larger* runners (billed even
+# on public repos) and (b) storage overage (handled by retention-days elsewhere).
+# This gate fails if any workflow reintroduces a larger/billable runner label.
+
+on:
+  push:
+    branches:
+    - main
+    paths:
+    - '.github/workflows/**'
+  pull_request:
+    paths:
+    - '.github/workflows/**'
+
+permissions:
+  contents: read
+
+jobs:
+  no-billable-runners:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@main
+    - name: Assert no larger/billable runner labels are referenced
+      run: |
+        set -euo pipefail
+        # PUBLIC repo: standard *-latest runners are free & unlimited; LARGER
+        # runners bill even on public repos. Fail if any workflow references a
+        # larger-runner label ANYWHERE -- on a `runs-on:` line OR as a
+        # strategy.matrix `os:` value (closing the matrix-include blind spot).
+        # Exclude this guard file, which names the labels in its own pattern.
+        # Larger-runner label forms: windows-11-arm ; *-large ; *-xlarge ;
+        # *-<N>-core(s) (e.g. ubuntu-latest-4-cores). Standard ubuntu/windows/
+        # macOS-latest never match.
+        # Also fails on `self-hosted`: this repo is public, where a self-hosted
+        # runner is a code-execution risk (untrusted fork PRs) and is not a
+        # free standard runner.
+        pattern='(windows-11-arm|self-hosted|[a-z0-9_-]+-(large|xlarge)|[a-z0-9_-]+-[0-9]+-cores?)'
+        set +e
+        hits=$(grep -rInE --exclude=costguard.yml "$pattern" .github/workflows/)
+        rc=$?
+        set -e
+        # grep exit: 0=match found (FAIL) ; 1=no match (pass) ; >1=error (FAIL,
+        # never silently treat an error as clean).
+        if [ "$rc" -gt 1 ]; then
+          echo "::error::cost guard: grep errored (exit $rc)"; exit 1
+        fi
+        if [ -n "$hits" ]; then
+          printf '%s\n' "$hits"
+          echo "::error::A billable/larger runner label is referenced above. Public-repo CI must use only free standard runners (ubuntu/windows/macOS-latest)."
+          exit 1
+        fi
+        echo "cost guard: no billable runner labels found."

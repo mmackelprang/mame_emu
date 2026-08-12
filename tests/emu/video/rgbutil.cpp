@@ -67,7 +67,7 @@ TEST_CASE("check rgb", "[emu][video]")
 	s32 expected_a, expected_r, expected_g, expected_b;
 	s32 actual_a, actual_r, actual_g, actual_b;
 	s32 imm;
-	rgbaint_t rgb, other;
+	rgbaint_t rgb;
 	rgb_t packed;
 	auto check_expected = [&] ()
 	{
