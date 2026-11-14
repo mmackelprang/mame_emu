@@ -49,7 +49,7 @@ jobs:
     # Canary fallback: GitHub-hosted when available, else appserver.
     needs: probe-github
     if: ${{ !cancelled() }}
-    runs-on: ${{ fromJSON(needs.probe-github.outputs.gh_ok == 'true' && '["ubuntu-latest"]' || '["self-hosted","linux","x64","appserver"]') }}
+    runs-on: ubuntu-latest  # 2026-11-14: the appserver fallback is retired (public repo; homelab H7)
     steps:
     - uses: actions/checkout@main
       with:
